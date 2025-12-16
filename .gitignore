@@ -1,0 +1,166 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Aa]rm/
+[Aa]rm64/
+bld/
+[Bb]uild/
+[Bb]uilds/
+[Ll]og/
+[Ll]ogs/
+[Aa]rtifacts/
+
+# Visual Studio / MSBuild
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+*.VC.db
+*.VC.VC.opendb
+
+# Visual Studio cache/options directory
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Visual Studio for Mac
+.vs-mac/
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+*.DotSettings.user
+_ReSharper*/
+
+# NUnit / MSTest / VSTest
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+*.testlog
+
+# BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
+
+# Coverlet / general coverage outputs
+coverage/
+coverage.*
+*.lcov
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# Click-Once
+publish/
+
+# NuGet
+*.nupkg
+*.snupkg
+*.nuspec
+packages/
+**/packages/*
+!**/packages/build/
+
+# dotnet tool restore
+.dotnet/
+
+# Paket
+.paket/
+paket-files/
+
+# Cake
+.tools/
+
+# NPM / Yarn (in case the repo includes frontend tooling)
+node_modules/
+.npm/
+.yarn/
+.pnp.*
+
+# Logs
+*.log
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*.old
+
+# SQL Server / LocalDB
+*.mdf
+*.ldf
+*.ndf
+
+# Azure / publish profiles
+*.publishsettings
+*.pubxml
+*.pubxml.user
+
+# AppCenter
+appcenter-pre-build.sh
+appcenter-post-build.sh
+
+# User-specific files
+*.userprefs
+*.pidb
+*.booproj
+*.svclog
+*.pdb
+
+# Fakes
+FakesAssemblies/
+
+# Resharper / dotTrace / dotCover
+*.dotCover
+*.dotMemory
+*.dotTrace
+
+# StyleCop
+StyleCopReport.xml
+
+# Microsoft.CodeAnalysis (Roslyn) artifacts
+*.ide
+
+# Generated files (common)
+GeneratedFiles/
+
+# ASP.NET
+wwwroot/lib/
+
+# Local settings overrides (optional convention)
+appsettings.Local.json
+appsettings.local.json
+
+# Temporary files
+*.cache
+*.temp
+*.tmp
+
+# MSBuild binary and structured logs
+*.binlog
+*.buildlog
+
+# Rider caches
+.idea/*
+
+# PowerShell
+*.psm1.cache
+
+# Windows shortcuts
+*.lnk

@@ -1,0 +1,674 @@
+# DataSurface
+
+> **Contract-driven CRUD HTTP endpoints for ASP.NET Core**
+
+DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoints from a single source of truth: the **ResourceContract**. Define your resources once using C# attributes or database metadata, and get automatic validation, filtering, sorting, pagination, and more.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Packages](#packages)
+- [Quick Start](#quick-start)
+- [Guides](#guides)
+  - [Static Resources (EF Core)](#guide-static-resources-ef-core)
+  - [Dynamic Resources (Runtime Metadata)](#guide-dynamic-resources-runtime-metadata)
+  - [Admin Endpoints](#guide-admin-endpoints)
+  - [OpenAPI / Swagger](#guide-openapi--swagger)
+- [Attributes Reference](#attributes-reference)
+- [Query API](#query-api)
+- [Hooks & Overrides](#hooks--overrides)
+- [Configuration Options](#configuration-options)
+- [Architecture](#architecture)
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Auto-generated endpoints** | `GET`, `POST`, `PATCH`, `DELETE` via Minimal APIs |
+| **Field-level control** | Choose which fields appear in read/create/update DTOs |
+| **Validation** | Required fields, immutable fields, unknown field rejection |
+| **Filtering & Sorting** | Allowlisted fields with operators (`eq`, `gt`, `contains`, etc.) |
+| **Pagination** | Built-in `page` + `pageSize` with configurable max |
+| **Expansion** | `expand=relation` with depth limits |
+| **Concurrency** | Row version + `ETag` / `If-Match` headers |
+| **Authorization** | Per-operation policy names |
+| **Hooks** | Global and entity-specific lifecycle hooks |
+| **Overrides** | Replace any CRUD operation with custom logic |
+| **Soft delete** | Built-in `ISoftDelete` convention support |
+| **Dynamic entities** | Runtime-defined resources without recompilation |
+
+---
+
+## Packages
+
+| Package | Purpose |
+|---------|---------|
+| `DataSurface.Core` | Contracts, attributes, and builders |
+| `DataSurface.EFCore` | EF Core CRUD service, hooks, query engine |
+| `DataSurface.Dynamic` | Runtime metadata storage, dynamic CRUD service |
+| `DataSurface.Http` | Minimal API endpoint mapping, query parsing, ETags |
+| `DataSurface.Admin` | Admin endpoints for managing dynamic entities |
+| `DataSurface.OpenApi` | Swashbuckle integration for typed schemas |
+| `DataSurface.Generator` | *(Optional)* Source generator for typed DTOs |
+
+**Typical combinations:**
+- **Static only:** `Core` + `EFCore` + `Http`
+- **Dynamic only:** `Core` + `Dynamic` + `Http` + `Admin`
+- **Both:** All of the above
+
+---
+
+## Quick Start
+
+### 1. Define your entity
+
+```csharp
+using DataSurface.Core.Annotations;
+using DataSurface.Core.Enums;
+
+[CrudResource("users")]
+public class User
+{
+    [CrudKey]
+    public int Id { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, RequiredOnCreate = true)]
+    public string Email { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Filter | CrudDto.Sort)]
+    public DateTime CreatedAt { get; set; }
+
+    [CrudConcurrency]
+    public byte[] RowVersion { get; set; } = default!;
+}
+```
+
+### 2. Register services
+
+```csharp
+using DataSurface.EFCore.Services;
+using System.Reflection;
+
+// Register contracts and EF Core services
+builder.Services.AddDataSurfaceEfCore(opt =>
+{
+    opt.AssembliesToScan = [Assembly.GetExecutingAssembly()];
+});
+
+// Register CRUD runtime
+builder.Services.AddScoped<CrudHookDispatcher>();
+builder.Services.AddSingleton<CrudOverrideRegistry>();
+builder.Services.AddScoped<EfDataSurfaceCrudService>();
+builder.Services.AddScoped<IDataSurfaceCrudService>(sp => 
+    sp.GetRequiredService<EfDataSurfaceCrudService>());
+```
+
+### 3. Map endpoints
+
+```csharp
+using DataSurface.Http;
+
+app.MapDataSurfaceCrud();
+```
+
+**Result:** Your API now has these endpoints:
+- `GET    /api/users` — List with filtering, sorting, pagination
+- `GET    /api/users/{id}` — Get single resource
+- `POST   /api/users` — Create
+- `PATCH  /api/users/{id}` — Update
+- `DELETE /api/users/{id}` — Delete
+
+---
+
+## Guides
+
+### Guide: Static Resources (EF Core)
+
+For compile-time defined entities backed by Entity Framework Core.
+
+#### Step 1: Annotate your entities
+
+```csharp
+[CrudResource("posts", MaxPageSize = 100)]
+public class Post
+{
+    [CrudKey]
+    public int Id { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update | CrudDto.Filter | CrudDto.Sort,
+        RequiredOnCreate = true, MaxLength = 200)]
+    public string Title { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update)]
+    public string? Content { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Filter)]
+    public int AuthorId { get; set; }
+
+    [CrudField(CrudDto.Read)]
+    public DateTime CreatedAt { get; set; }
+
+    [CrudRelation(ReadExpandAllowed = true, WriteMode = RelationWriteMode.ById)]
+    public User Author { get; set; } = default!;
+
+    [CrudConcurrency]
+    public byte[] RowVersion { get; set; } = default!;
+}
+```
+
+#### Step 2: Create your DbContext
+
+```csharp
+using DataSurface.EFCore.Context;
+
+public class AppDbContext : DeclarativeDbContext<AppDbContext>
+{
+    public AppDbContext(
+        DbContextOptions<AppDbContext> options,
+        DataSurfaceEfCoreOptions dsOptions,
+        IResourceContractProvider contracts)
+        : base(options, dsOptions, contracts) { }
+}
+```
+
+#### Step 3: Register all services
+
+```csharp
+// Program.cs
+using DataSurface.EFCore.Services;
+using DataSurface.Http;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// EF Core
+builder.Services.AddDbContext<AppDbContext>(opt => 
+    opt.UseSqlServer(connectionString));
+
+// DataSurface contracts
+builder.Services.AddDataSurfaceEfCore(opt =>
+{
+    opt.AssembliesToScan = [typeof(Program).Assembly];
+});
+
+// DataSurface runtime
+builder.Services.AddScoped<CrudHookDispatcher>();
+builder.Services.AddSingleton<CrudOverrideRegistry>();
+builder.Services.AddScoped<EfDataSurfaceCrudService>();
+builder.Services.AddScoped<IDataSurfaceCrudService>(sp => 
+    sp.GetRequiredService<EfDataSurfaceCrudService>());
+
+var app = builder.Build();
+
+// Map CRUD endpoints
+app.MapDataSurfaceCrud();
+
+app.Run();
+```
+
+---
+
+### Guide: Dynamic Resources (Runtime Metadata)
+
+For entities defined at runtime without recompilation.
+
+#### Step 1: Add dynamic tables to your DbContext
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+    modelBuilder.AddDataSurfaceDynamic(schema: "dbo");
+}
+```
+
+#### Step 2: Register dynamic services
+
+```csharp
+using DataSurface.Dynamic.DI;
+using DataSurface.Dynamic.Contracts;
+
+// Static contracts (if any)
+builder.Services.AddDataSurfaceEfCore(opt => { /* ... */ });
+
+// Dynamic contracts
+builder.Services.AddDataSurfaceDynamic(opt =>
+{
+    opt.Schema = "dbo";
+    opt.WarmUpContractsOnStart = true;
+});
+
+// Use composite provider for both static + dynamic
+builder.Services.AddScoped<IResourceContractProvider>(sp => 
+    sp.GetRequiredService<CompositeResourceContractProvider>());
+
+// Use router to dispatch to correct backend
+builder.Services.AddScoped<DataSurfaceCrudRouter>();
+builder.Services.AddScoped<IDataSurfaceCrudService>(sp => 
+    sp.GetRequiredService<DataSurfaceCrudRouter>());
+```
+
+#### Step 3: Map with dynamic catch-all enabled
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    MapStaticResources = true,
+    MapDynamicCatchAll = true  // Enables /api/d/{route}
+});
+```
+
+---
+
+### Guide: Admin Endpoints
+
+Manage dynamic entity definitions via REST API.
+
+```csharp
+using DataSurface.Admin.DI;
+using DataSurface.Admin;
+
+builder.Services.AddDataSurfaceAdmin();
+
+app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
+{
+    Prefix = "/admin/ds",
+    RequireAuthorization = true,
+    Policy = "DataSurfaceAdmin"
+});
+```
+
+**Available endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/admin/ds/entities` | List all entity definitions |
+| `GET` | `/admin/ds/entities/{key}` | Get single entity definition |
+| `PUT` | `/admin/ds/entities/{key}` | Create or update entity definition |
+| `DELETE` | `/admin/ds/entities/{key}` | Delete entity definition |
+| `GET` | `/admin/ds/export` | Export all definitions as JSON |
+| `POST` | `/admin/ds/import` | Import definitions from JSON |
+| `POST` | `/admin/ds/entities/{key}/reindex` | Rebuild search indexes |
+
+---
+
+### Guide: OpenAPI / Swagger
+
+Generate typed schemas for Swashbuckle.
+
+```csharp
+using DataSurface.OpenApi;
+
+builder.Services.AddSwaggerGen(swagger =>
+{
+    builder.Services.AddDataSurfaceOpenApi(swagger);
+});
+```
+
+This adds:
+- Typed request/response schemas per resource
+- Query parameter documentation for filtering
+- Proper `PagedResult<T>` schema for list responses
+
+---
+
+## Attributes Reference
+
+### `[CrudResource]`
+
+Marks a class as a CRUD resource.
+
+```csharp
+[CrudResource("users", 
+    ResourceKey = "User",           // Default: class name
+    MaxPageSize = 200,              // Default: 200
+    MaxExpandDepth = 2,             // Default: 1
+    EnableList = true,              // Default: true
+    EnableGet = true,               // Default: true
+    EnableCreate = true,            // Default: true
+    EnableUpdate = true,            // Default: true
+    EnableDelete = true)]           // Default: true
+public class User { }
+```
+
+### `[CrudKey]`
+
+Marks the primary key property.
+
+```csharp
+[CrudKey(ApiName = "id")]  // Optional: customize API name
+public int Id { get; set; }
+```
+
+### `[CrudField]`
+
+Controls field visibility and behavior.
+
+```csharp
+[CrudField(
+    CrudDto.Read | CrudDto.Create | CrudDto.Update | CrudDto.Filter | CrudDto.Sort,
+    ApiName = "email",              // Optional: customize API name
+    RequiredOnCreate = true,        // Validation: required on POST
+    Immutable = false,              // If true: rejected on PATCH
+    Hidden = false,                 // If true: never exposed
+    MinLength = 1,                  // String validation
+    MaxLength = 255,                // String validation
+    Min = 0,                        // Numeric validation
+    Max = 100,                      // Numeric validation
+    Regex = @"^[\w@.]+$")]          // Pattern validation
+public string Email { get; set; }
+```
+
+**`CrudDto` flags:**
+
+| Flag | Effect |
+|------|--------|
+| `Read` | Included in GET responses |
+| `Create` | Accepted in POST body |
+| `Update` | Accepted in PATCH body |
+| `Filter` | Can be used in `filter[field]=value` |
+| `Sort` | Can be used in `sort=field` |
+
+### `[CrudRelation]`
+
+Configures navigation property behavior.
+
+```csharp
+[CrudRelation(
+    ReadExpandAllowed = true,       // Can use expand=author
+    DefaultExpanded = false,        // Auto-expand without asking
+    WriteMode = RelationWriteMode.ById,  // How to write
+    WriteFieldName = "authorId",    // Field name for writes
+    RequiredOnCreate = false)]
+public User Author { get; set; }
+```
+
+**`RelationWriteMode` options:**
+- `None` — Cannot write relation
+- `ById` — Write via FK field (e.g., `authorId`)
+- `ByIdList` — Write via ID array (e.g., `tagIds`)
+- `NestedDisabled` — Nested objects rejected
+
+### `[CrudConcurrency]`
+
+Marks a row version field for optimistic concurrency.
+
+```csharp
+[CrudConcurrency(RequiredOnUpdate = true)]
+public byte[] RowVersion { get; set; }
+```
+
+### `[CrudAuthorize]`
+
+Sets authorization policies per operation.
+
+```csharp
+[CrudAuthorize(Policy = "AdminOnly")]  // All operations
+[CrudAuthorize(Operation = CrudOperation.Delete, Policy = "SuperAdmin")]
+public class User { }
+```
+
+### `[CrudHidden]`
+
+Completely hides a property from the contract.
+
+```csharp
+[CrudHidden]
+public string InternalSecret { get; set; }
+```
+
+### `[CrudIgnore]`
+
+Excludes a property from contract generation (use for EF navigation properties you don't want exposed).
+
+---
+
+## Query API
+
+### List endpoint: `GET /api/{resource}`
+
+| Parameter | Example | Description |
+|-----------|---------|-------------|
+| `page` | `?page=2` | Page number (1-based, default: 1) |
+| `pageSize` | `?pageSize=50` | Items per page (default: 20) |
+| `sort` | `?sort=title,-createdAt` | Comma-separated, `-` prefix for descending |
+| `filter[field]` | `?filter[status]=active` | Filter by field value |
+| `expand` | `?expand=author,tags` | Include related resources |
+
+### Filter operators
+
+```
+?filter[price]=100          # equals (default)
+?filter[price]=eq:100       # equals
+?filter[price]=neq:100      # not equals
+?filter[price]=gt:100       # greater than
+?filter[price]=gte:100      # greater than or equal
+?filter[price]=lt:100       # less than
+?filter[price]=lte:100      # less than or equal
+?filter[name]=contains:john # string contains
+?filter[name]=starts:john   # string starts with
+?filter[name]=ends:son      # string ends with
+?filter[status]=in:a|b|c    # in list (pipe-separated)
+```
+
+### Response format
+
+```json
+{
+  "items": [...],
+  "page": 1,
+  "pageSize": 20,
+  "total": 142
+}
+```
+
+### Concurrency (ETag)
+
+**Response:**
+```http
+HTTP/1.1 200 OK
+ETag: W/"AAAAAAB="
+```
+
+**Update with concurrency check:**
+```http
+PATCH /api/users/1
+If-Match: W/"AAAAAAB="
+Content-Type: application/json
+
+{"email": "new@example.com"}
+```
+
+---
+
+## Hooks & Overrides
+
+### Global Hooks
+
+Run for all resources.
+
+```csharp
+public class AuditHook : ICrudHook
+{
+    public int Order => 0;  // Lower runs first
+
+    public Task BeforeAsync(CrudHookContext ctx)
+    {
+        Console.WriteLine($"Before {ctx.Operation} on {ctx.Contract.ResourceKey}");
+        return Task.CompletedTask;
+    }
+
+    public Task AfterAsync(CrudHookContext ctx)
+    {
+        Console.WriteLine($"After {ctx.Operation}");
+        return Task.CompletedTask;
+    }
+}
+
+// Register
+builder.Services.AddScoped<ICrudHook, AuditHook>();
+```
+
+### Entity-Specific Hooks
+
+Run only for a specific entity type.
+
+```csharp
+public class UserHook : ICrudHook<User>
+{
+    public int Order => 0;
+
+    public Task BeforeCreateAsync(User entity, JsonObject body, CrudHookContext ctx)
+    {
+        entity.CreatedAt = DateTime.UtcNow;
+        return Task.CompletedTask;
+    }
+
+    public Task AfterCreateAsync(User entity, CrudHookContext ctx)
+    {
+        // Send welcome email
+        return Task.CompletedTask;
+    }
+}
+
+// Register
+builder.Services.AddScoped<ICrudHook<User>, UserHook>();
+```
+
+### Operation Overrides
+
+Completely replace CRUD logic for a resource.
+
+```csharp
+var registry = app.Services.GetRequiredService<CrudOverrideRegistry>();
+
+registry.Override("User", CrudOperation.Create, 
+    async (CreateOverride)((contract, body, ctx, ct) =>
+    {
+        // Custom creation logic
+        var user = new User { Email = body["email"]!.GetValue<string>() };
+        ctx.Db.Add(user);
+        await ctx.Db.SaveChangesAsync(ct);
+        
+        return new JsonObject { ["id"] = user.Id, ["email"] = user.Email };
+    }));
+```
+
+---
+
+## Configuration Options
+
+### `DataSurfaceEfCoreOptions`
+
+```csharp
+builder.Services.AddDataSurfaceEfCore(opt =>
+{
+    opt.AssembliesToScan = [typeof(Program).Assembly];
+    opt.AutoRegisterCrudEntities = true;    // Auto-register in DbContext
+    opt.EnableSoftDeleteFilter = true;      // Apply IsDeleted filter
+    opt.EnableRowVersionConvention = true;  // Configure RowVersion columns
+    opt.UseCamelCaseApiNames = true;        // camelCase API names
+    
+    opt.ContractBuilderOptions.ExposeFieldsOnlyWhenAnnotated = true;
+});
+```
+
+### `DataSurfaceHttpOptions`
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    ApiPrefix = "/api",                     // Route prefix
+    MapStaticResources = true,              // Map static entity routes
+    MapDynamicCatchAll = true,              // Map /api/d/{route}
+    DynamicPrefix = "/d",                   // Dynamic route prefix
+    MapResourceDiscoveryEndpoint = true,    // GET /api/$resources
+    RequireAuthorizationByDefault = false,  // Require auth on all endpoints
+    DefaultPolicy = null,                   // Default auth policy
+    EnableEtags = true,                     // ETag response headers
+    ThrowOnRouteCollision = false           // Fail on duplicate routes
+});
+```
+
+### `DataSurfaceDynamicOptions`
+
+```csharp
+builder.Services.AddDataSurfaceDynamic(opt =>
+{
+    opt.Schema = "dbo";                     // DB schema for dynamic tables
+    opt.WarmUpContractsOnStart = true;      // Load contracts at startup
+});
+```
+
+### `DataSurfaceAdminOptions`
+
+```csharp
+app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
+{
+    Prefix = "/admin/ds",                   // Route prefix
+    RequireAuthorization = true,            // Require auth
+    Policy = "DataSurfaceAdmin"             // Auth policy name
+});
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        HTTP Layer                                │
+│  DataSurface.Http: Minimal API mapping, query parsing, ETags    │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    IDataSurfaceCrudService                       │
+│  ListAsync, GetAsync, CreateAsync, UpdateAsync, DeleteAsync     │
+└─────────────────────────────────────────────────────────────────┘
+                    │                       │
+                    ▼                       ▼
+┌──────────────────────────────┐ ┌──────────────────────────────┐
+│   EfDataSurfaceCrudService   │ │ DynamicDataSurfaceCrudService │
+│   DataSurface.EFCore         │ │   DataSurface.Dynamic         │
+│   (Static EF entities)       │ │   (JSON records)              │
+└──────────────────────────────┘ └──────────────────────────────┘
+                    │                       │
+                    ▼                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    ResourceContract                              │
+│  DataSurface.Core: Single source of truth                       │
+│  - Fields, Relations, Operations, Query limits, Security        │
+└─────────────────────────────────────────────────────────────────┘
+                    │                       │
+                    ▼                       ▼
+┌──────────────────────────────┐ ┌──────────────────────────────┐
+│     ContractBuilder          │ │   DynamicContractBuilder      │
+│  (C# attributes → Contract)  │ │  (DB metadata → Contract)     │
+└──────────────────────────────┘ └──────────────────────────────┘
+```
+
+### Key abstractions
+
+| Interface | Purpose |
+|-----------|---------|
+| `IDataSurfaceCrudService` | Executes CRUD operations |
+| `IResourceContractProvider` | Provides contracts by resource key |
+| `ICrudHook` | Global lifecycle hooks |
+| `ICrudHook<T>` | Entity-specific lifecycle hooks |
+
+---
+
+## Quick Checklist
+
+- [ ] Add package references (`DataSurface.Core`, `DataSurface.EFCore`, `DataSurface.Http`)
+- [ ] Annotate entities with `[CrudResource]`, `[CrudKey]`, `[CrudField]`
+- [ ] Call `AddDataSurfaceEfCore()` with assemblies to scan
+- [ ] Register `CrudHookDispatcher`, `CrudOverrideRegistry`, `EfDataSurfaceCrudService`
+- [ ] Register `IDataSurfaceCrudService`
+- [ ] Call `app.MapDataSurfaceCrud()`
+- [ ] *(Optional)* Add `DataSurface.OpenApi` for Swagger schemas
+- [ ] *(Optional)* Add `DataSurface.Admin` for runtime entity management

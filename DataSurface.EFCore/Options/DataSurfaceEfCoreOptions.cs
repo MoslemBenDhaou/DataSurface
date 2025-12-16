@@ -26,6 +26,11 @@ public sealed class DataSurfaceEfCoreOptions
     /// </summary>
     public bool EnableRowVersionConvention { get; set; } = true;    // if entity has RowVersion byte[]
     /// <summary>
+    /// When <see langword="true"/>, automatically populates <c>CreatedAt</c> and <c>UpdatedAt</c> for entities
+    /// implementing <see cref="Interfaces.ITimestamped"/>.
+    /// </summary>
+    public bool EnableTimestampConvention { get; set; } = true;     // if entity has ITimestamped
+    /// <summary>
     /// When <see langword="true"/>, uses camelCase API names consistent with the Core contract builder conventions.
     /// </summary>
     public bool UseCamelCaseApiNames { get; set; } = true;          // consistent with Core builder

@@ -3,6 +3,7 @@ using DataSurface.Core.Enums;
 using DataSurface.EFCore.Interfaces;
 using DataSurface.EFCore.Options;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 namespace DataSurface.EFCore.Context;
 
@@ -65,6 +66,40 @@ public abstract class DeclarativeDbContext<TContext> : DbContext
         if (_opt.EnableRowVersionConvention)
         {
             ApplyRowVersionConvention(modelBuilder);
+        }
+    }
+
+    /// <inheritdoc />
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        ApplyTimestamps();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    /// <inheritdoc />
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        ApplyTimestamps();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void ApplyTimestamps()
+    {
+        if (!_opt.EnableTimestampConvention) return;
+
+        var now = DateTime.UtcNow;
+        foreach (var entry in ChangeTracker.Entries<ITimestamped>())
+        {
+            switch (entry.State)
+            {
+                case EntityState.Added:
+                    entry.Entity.CreatedAt = now;
+                    entry.Entity.UpdatedAt = now;
+                    break;
+                case EntityState.Modified:
+                    entry.Entity.UpdatedAt = now;
+                    break;
+            }
         }
     }
 

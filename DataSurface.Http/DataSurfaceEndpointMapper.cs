@@ -30,7 +30,10 @@ public static class DataSurfaceEndpointMapper
         var group = app.MapGroup(options.ApiPrefix);
 
         if (options.MapResourceDiscoveryEndpoint)
+        {
             DataSurfaceResourceDiscovery.MapDiscovery(group);
+            DataSurfaceSchemaEndpoint.MapSchema(group);
+        }
 
         if (options.MapStaticResources)
             MapStatic(group, options);
@@ -187,6 +190,18 @@ public static class DataSurfaceEndpointMapper
             .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
 
             ApplyAuth(ep, c, CrudOperation.List, opt);
+
+            // HEAD - returns count in header without body
+            var headEp = group.MapMethods(route, new[] { "HEAD" }, async (HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
+            {
+                try { return await HandleHead(c, req, res, sp, opt, ct); }
+                catch (Exception ex) { return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext); }
+            })
+            .WithTags(c.Route)
+            .WithName($"{c.Route}.head")
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
+
+            ApplyAuth(headEp, c, CrudOperation.List, opt);
         }
 
         // GET
@@ -277,7 +292,30 @@ public static class DataSurfaceEndpointMapper
         var expand = DataSurfaceQueryParser.ParseExpand(req, c);
 
         var result = await crud.ListAsync(c.ResourceKey, spec, expand, ct);
+
+        // Set count headers for client convenience
+        res.Headers["X-Total-Count"] = result.Total.ToString();
+        res.Headers["X-Page"] = result.Page.ToString();
+        res.Headers["X-Page-Size"] = result.PageSize.ToString();
+
         return Results.Ok(result);
+    }
+
+    private static async Task<IResult> HandleHead(ResourceContract c, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
+    {
+        var crud = sp.GetRequiredService<IDataSurfaceCrudService>();
+
+        // Use minimal page size since we only need the count
+        var spec = DataSurfaceQueryParser.ParseQuerySpec(req, c);
+        spec = spec with { PageSize = 1 };
+
+        var result = await crud.ListAsync(c.ResourceKey, spec, expand: null, ct);
+
+        res.Headers["X-Total-Count"] = result.Total.ToString();
+        res.Headers["X-Page"] = result.Page.ToString();
+        res.Headers["X-Page-Size"] = c.Query.MaxPageSize.ToString();
+
+        return Results.Ok();
     }
 
     private static async Task<IResult> HandleGet(ResourceContract c, string id, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)

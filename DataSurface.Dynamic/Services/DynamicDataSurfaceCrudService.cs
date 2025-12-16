@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DataSurface.Core.Contracts;
@@ -12,6 +13,7 @@ using DataSurface.EFCore.Exceptions;
 using DataSurface.EFCore.Interfaces;
 using DataSurface.EFCore.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace DataSurface.Dynamic.Services;
 
@@ -28,6 +30,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly CrudHookDispatcher _globalHooks;
     private readonly CrudResourceHookDispatcher _resourceHooks;
     private readonly CrudOverrideRegistry _overrides;
+    private readonly ILogger<DynamicDataSurfaceCrudService> _logger;
 
     private readonly IResourceContractProvider _compositeContracts; // for expand targets
 
@@ -47,6 +50,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="globalHooks">Dispatcher for global hooks.</param>
     /// <param name="resourceHooks">Dispatcher for resource-specific hooks.</param>
     /// <param name="overrides">Registry of per-resource override delegates.</param>
+    /// <param name="logger">The logger instance.</param>
     public DynamicDataSurfaceCrudService(
         DbContext db,
         DynamicResourceContractProvider contracts,
@@ -55,17 +59,18 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         IServiceProvider sp,
         CrudHookDispatcher globalHooks,
         CrudResourceHookDispatcher resourceHooks,
-        CrudOverrideRegistry overrides)
+        CrudOverrideRegistry overrides,
+        ILogger<DynamicDataSurfaceCrudService> logger)
     {
         _db = db;
         _contracts = contracts;
         _compositeContracts = compositeContracts;
         _index = index;
         _sp = sp;
-
         _globalHooks = globalHooks;
         _resourceHooks = resourceHooks;
         _overrides = overrides;
+        _logger = logger;
     }
 
     /// <inheritdoc />
@@ -79,6 +84,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <returns>A paged result containing the retrieved records.</returns>
     public async Task<PagedResult<JsonObject>> ListAsync(string resourceKey, QuerySpec spec, ExpandSpec? expand = null, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Dynamic List {Resource} page={Page} pageSize={PageSize}", resourceKey, spec.Page, spec.PageSize);
+
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.List);
 
@@ -122,6 +130,10 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogDebug("Dynamic List {Resource} completed in {ElapsedMs}ms, returned {Count}/{Total} items",
+            resourceKey, sw.ElapsedMilliseconds, items.Count, total);
+
         return new PagedResult<JsonObject>(items, page, pageSize, total);
     }
 
@@ -136,6 +148,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <returns>The retrieved record, or null if not found.</returns>
     public async Task<JsonObject?> GetAsync(string resourceKey, object id, ExpandSpec? expand = null, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Dynamic Get {Resource} id={Id}", resourceKey, id);
+
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.Get);
 
@@ -167,6 +182,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _resourceHooks.AfterReadAsync(c.ResourceKey, row.Id, obj, hookCtx);
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogDebug("Dynamic Get {Resource} id={Id} completed in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return obj;
     }
 
@@ -180,6 +197,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <returns>The created record.</returns>
     public async Task<JsonObject> CreateAsync(string resourceKey, JsonObject body, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Dynamic Create {Resource}", resourceKey);
+
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.Create);
 
@@ -227,6 +247,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         await _resourceHooks.AfterCreateAsync(c.ResourceKey, created, hookCtx);
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogInformation("Dynamic Created {Resource} id={Id} in {ElapsedMs}ms", resourceKey, recordId, sw.ElapsedMilliseconds);
         return created;
     }
 
@@ -241,6 +263,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <returns>The updated record.</returns>
     public async Task<JsonObject> UpdateAsync(string resourceKey, object id, JsonObject patch, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Dynamic Update {Resource} id={Id}", resourceKey, id);
+
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.Update);
 
@@ -289,6 +314,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         await _resourceHooks.AfterUpdateAsync(c.ResourceKey, id, updated, hookCtx);
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogInformation("Dynamic Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return updated;
     }
 
@@ -302,6 +329,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="ct">The cancellation token.</param>
     public async Task DeleteAsync(string resourceKey, object id, CrudDeleteSpec? deleteSpec = null, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Dynamic Delete {Resource} id={Id} hard={Hard}", resourceKey, id, deleteSpec?.HardDelete ?? false);
+
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.Delete);
 
@@ -336,6 +366,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             // indexes can remain (filtered out by IsDeleted) OR be deleted.
             await _resourceHooks.AfterDeleteAsync(c.ResourceKey, id, hookCtx);
             await _globalHooks.AfterGlobalAsync(hookCtx);
+
+            _logger.LogInformation("Dynamic Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
 
@@ -347,6 +379,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _resourceHooks.AfterDeleteAsync(c.ResourceKey, id, hookCtx);
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogInformation("Dynamic Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }
 
     // ---------------- helpers ----------------

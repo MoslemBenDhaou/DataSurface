@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
@@ -8,6 +9,7 @@ using DataSurface.EFCore.Exceptions;
 using DataSurface.EFCore.Interfaces;
 using DataSurface.EFCore.Mapper;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace DataSurface.EFCore.Services;
 
@@ -23,6 +25,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly IServiceProvider _sp;
     private readonly CrudHookDispatcher _hooks;
     private readonly CrudOverrideRegistry _overrides;
+    private readonly ILogger<EfDataSurfaceCrudService> _logger;
 
     /// <summary>
     /// Creates a new CRUD service.
@@ -34,6 +37,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="sp">The service provider.</param>
     /// <param name="hooks">Dispatcher for global and typed hooks.</param>
     /// <param name="overrides">Registry of per-resource override delegates.</param>
+    /// <param name="logger">The logger instance.</param>
     public EfDataSurfaceCrudService(
         DbContext db,
         IResourceContractProvider contracts,
@@ -41,16 +45,17 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         EfCrudMapper mapper,
         IServiceProvider sp,
         CrudHookDispatcher hooks,
-        CrudOverrideRegistry overrides)
+        CrudOverrideRegistry overrides,
+        ILogger<EfDataSurfaceCrudService> logger)
     {
         _db = db;
         _contracts = contracts;
         _query = query;
         _mapper = mapper;
-
         _sp = sp;
         _hooks = hooks;
         _overrides = overrides;
+        _logger = logger;
     }
 
     /// <inheritdoc />
@@ -65,6 +70,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task<PagedResult<JsonObject>> ListAsync(
         string resourceKey, QuerySpec spec, ExpandSpec? expand = null, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("List {Resource} page={Page} pageSize={PageSize}", resourceKey, spec.Page, spec.PageSize);
+
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.List);
 
@@ -96,6 +104,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.AfterGlobalAsync(hookCtx);
 
+        _logger.LogDebug("List {Resource} completed in {ElapsedMs}ms, returned {Count}/{Total} items",
+            resourceKey, sw.ElapsedMilliseconds, json.Count, total);
+
         return new PagedResult<JsonObject>(
             json,
             Math.Max(1, spec.Page),
@@ -115,6 +126,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task<JsonObject?> GetAsync(
         string resourceKey, object id, ExpandSpec? expand = null, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Get {Resource} id={Id}", resourceKey, id);
+
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Get);
 
@@ -145,6 +159,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var json = EntityToJson(entity, c, expand);
 
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogDebug("Get {Resource} id={Id} completed in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
     }
 
@@ -158,6 +174,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <returns>A JSON object representing the created resource.</returns>
     public async Task<JsonObject> CreateAsync(string resourceKey, JsonObject body, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Create {Resource}", resourceKey);
+
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Create);
 
@@ -188,6 +207,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var json = EntityToJson(entity, c, expand: null);
 
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogInformation("Created {Resource} in {ElapsedMs}ms", resourceKey, sw.ElapsedMilliseconds);
         return json;
     }
 
@@ -202,6 +223,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <returns>A JSON object representing the updated resource.</returns>
     public async Task<JsonObject> UpdateAsync(string resourceKey, object id, JsonObject patch, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Update {Resource} id={Id}", resourceKey, id);
+
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Update);
         ValidateBody(c, CrudOperation.Update, patch);
@@ -231,6 +255,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var json = EntityToJson(entity, c, expand: null);
 
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogInformation("Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
     }
 
@@ -244,6 +270,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="ct">The cancellation token.</param>
     public async Task DeleteAsync(string resourceKey, object id, CrudDeleteSpec? deleteSpec = null, CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
+        _logger.LogDebug("Delete {Resource} id={Id} hard={Hard}", resourceKey, id, deleteSpec?.HardDelete ?? false);
+
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Delete);
 
@@ -273,6 +302,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
             await InvokeTypedAfterDelete(entity, hookCtx);
             await _hooks.AfterGlobalAsync(hookCtx);
+
+            _logger.LogInformation("Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
 
@@ -281,6 +312,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await InvokeTypedAfterDelete(entity, hookCtx);
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        _logger.LogInformation("Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }
 
     // ----------------- helpers -----------------

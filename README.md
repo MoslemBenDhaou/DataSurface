@@ -20,6 +20,9 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 - [Query API](#query-api)
 - [Hooks & Overrides](#hooks--overrides)
 - [Configuration Options](#configuration-options)
+- [Timestamps Convention](#timestamps-convention)
+- [Schema Endpoint](#schema-endpoint)
+- [Logging](#logging)
 - [Architecture](#architecture)
 
 ---
@@ -39,6 +42,10 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 | **Hooks** | Global and entity-specific lifecycle hooks |
 | **Overrides** | Replace any CRUD operation with custom logic |
 | **Soft delete** | Built-in `ISoftDelete` convention support |
+| **Timestamps** | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
+| **Structured logging** | Built-in `ILogger` integration with operation timing |
+| **Schema endpoint** | `GET /api/$schema/{resource}` returns JSON Schema |
+| **HEAD support** | `HEAD` requests return count headers without body |
 | **Dynamic entities** | Runtime-defined resources without recompilation |
 
 ---
@@ -117,10 +124,12 @@ app.MapDataSurfaceCrud();
 
 **Result:** Your API now has these endpoints:
 - `GET    /api/users` — List with filtering, sorting, pagination
+- `HEAD   /api/users` — Get count only (in `X-Total-Count` header)
 - `GET    /api/users/{id}` — Get single resource
 - `POST   /api/users` — Create
 - `PATCH  /api/users/{id}` — Update
 - `DELETE /api/users/{id}` — Delete
+- `GET    /api/$schema/users` — Get JSON Schema for resource
 
 ---
 
@@ -465,6 +474,29 @@ Excludes a property from contract generation (use for EF navigation properties y
 }
 ```
 
+**Response headers (on list endpoints):**
+```http
+X-Total-Count: 142
+X-Page: 1
+X-Page-Size: 20
+```
+
+### HEAD requests
+
+Use `HEAD` to get only the count without fetching data:
+
+```http
+HEAD /api/users?filter[status]=active
+```
+
+**Response:**
+```http
+HTTP/1.1 200 OK
+X-Total-Count: 42
+X-Page: 1
+X-Page-Size: 200
+```
+
 ### Concurrency (ETag)
 
 **Response:**
@@ -570,6 +602,7 @@ builder.Services.AddDataSurfaceEfCore(opt =>
     opt.AutoRegisterCrudEntities = true;    // Auto-register in DbContext
     opt.EnableSoftDeleteFilter = true;      // Apply IsDeleted filter
     opt.EnableRowVersionConvention = true;  // Configure RowVersion columns
+    opt.EnableTimestampConvention = true;   // Auto-populate CreatedAt/UpdatedAt
     opt.UseCamelCaseApiNames = true;        // camelCase API names
     
     opt.ContractBuilderOptions.ExposeFieldsOnlyWhenAnnotated = true;
@@ -616,6 +649,97 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 
 ---
 
+## Timestamps Convention
+
+Entities implementing `ITimestamped` get automatic timestamp population:
+
+```csharp
+using DataSurface.EFCore.Interfaces;
+
+public class User : ITimestamped
+{
+    public int Id { get; set; }
+    public string Email { get; set; } = default!;
+    
+    // Auto-populated by DeclarativeDbContext
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+```
+
+- **On insert:** Both `CreatedAt` and `UpdatedAt` are set to `DateTime.UtcNow`
+- **On update:** Only `UpdatedAt` is refreshed
+- **Control:** Disable via `EnableTimestampConvention = false` in options
+
+---
+
+## Schema Endpoint
+
+Get JSON Schema for any resource:
+
+```http
+GET /api/$schema/users
+```
+
+**Response:**
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:datasurface:User",
+  "title": "User",
+  "type": "object",
+  "properties": {
+    "id": { "type": "integer", "format": "int32" },
+    "email": { "type": "string", "maxLength": 255 },
+    "createdAt": { "type": "string", "format": "date-time" }
+  },
+  "required": ["email"],
+  "x-operations": {
+    "list": { "enabled": true },
+    "get": { "enabled": true },
+    "create": { "enabled": true, "requiredOnCreate": ["email"] },
+    "update": { "enabled": true },
+    "delete": { "enabled": true }
+  },
+  "x-query": {
+    "maxPageSize": 200,
+    "filterableFields": ["email", "createdAt"],
+    "sortableFields": ["email", "createdAt"]
+  }
+}
+```
+
+Useful for:
+- Client-side form generation
+- API documentation
+- Contract validation
+
+---
+
+## Logging
+
+Both `EfDataSurfaceCrudService` and `DynamicDataSurfaceCrudService` emit structured logs:
+
+```
+[DBG] List User page=1 pageSize=20
+[DBG] List User completed in 45ms, returned 20/142 items
+[INF] Created User in 12ms
+[INF] Updated User id=5 in 8ms
+[INF] Deleted User id=5 in 3ms
+```
+
+**Log levels:**
+- `Debug` — Operation start and read completions
+- `Information` — Mutating operations (create, update, delete)
+
+**Structured properties:**
+- `{Resource}` — Resource key
+- `{Id}` — Entity ID (when applicable)
+- `{ElapsedMs}` — Operation duration
+- `{Count}` / `{Total}` — List result counts
+
+---
+
 ## Architecture
 
 ```
@@ -659,6 +783,8 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 | `IResourceContractProvider` | Provides contracts by resource key |
 | `ICrudHook` | Global lifecycle hooks |
 | `ICrudHook<T>` | Entity-specific lifecycle hooks |
+| `ITimestamped` | Auto-timestamp convention interface |
+| `ISoftDelete` | Soft-delete convention interface |
 
 ---
 

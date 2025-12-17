@@ -9,6 +9,28 @@
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+
+    <PackageId>DataSurface.Generator</PackageId>
+    <Version>1.0.0</Version> <!-- we’ll replace this with CI versioning later -->
+    <Authors>Moslem Ben Dhaou</Authors>
+    <Company>PEAK Consulting</Company>
+    <Description>(Optional) Source generator for typed DTOs</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/MoslemBenDhaou/DataSurface</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
   </PropertyGroup>
 
   <ItemGroup>

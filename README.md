@@ -33,34 +33,43 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 
 | Feature | Description |
 |---------|-------------|
+| ***Core CRUD Features*** | |
 | **Auto-generated endpoints** | `GET`, `POST`, `PATCH`, `DELETE` via Minimal APIs |
 | **Field-level control** | Choose which fields appear in read/create/update DTOs |
 | **Validation** | Required fields, immutable fields, unknown field rejection |
+| **Soft delete** | Built-in `ISoftDelete` convention support |
+| **Timestamps** | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
+| ***Querying & Data Retrieval*** | |
 | **Filtering & Sorting** | Allowlisted fields with operators (`eq`, `gt`, `contains`, etc.) |
 | **Pagination** | Built-in `page` + `pageSize` with configurable max |
 | **Expansion** | `expand=relation` with depth limits |
-| **Concurrency** | Row version + `ETag` / `If-Match` headers |
+| **HEAD support** | `HEAD` requests return count headers without body |
+| ***Authorization & Security*** | |
 | **Authorization** | Per-operation policy names |
 | **Row-level security** | `IResourceFilter<T>` for tenant/user-based query filtering |
 | **Resource authorization** | `IResourceAuthorizer<T>` for instance-level access control |
 | **Field authorization** | `IFieldAuthorizer` for field-level read/write control |
-| **Audit logging** | `IAuditLogger` for tracking all CRUD operations |
+| ***Concurrency & Data Integrity*** | |
+| **Concurrency** | Row version + `ETag` / `If-Match` headers |
+| ***Extensibility & Customization*** | |
 | **Hooks** | Global and entity-specific lifecycle hooks |
 | **Overrides** | Replace any CRUD operation with custom logic |
-| **Soft delete** | Built-in `ISoftDelete` convention support |
-| **Timestamps** | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
+| **Dynamic entities** | Runtime-defined resources without recompilation |
+| ***Performance & Caching*** | |
+| **Compiled queries** | Pre-compiled EF Core queries for common operations |
+| **Query caching** | Optional `IDistributedCache` integration |
+| **Response caching** | ETag-based 304 responses, configurable Cache-Control |
+| ***Advanced Operations*** | |
+| **Bulk operations** | Batch create/update/delete via `/bulk` endpoint |
+| **Async streaming** | `IAsyncEnumerable` support via `/stream` endpoint |
+| ***Observability & Monitoring*** | |
+| **Audit logging** | `IAuditLogger` for tracking all CRUD operations |
 | **Structured logging** | Built-in `ILogger` integration with operation timing |
 | **Metrics** | OpenTelemetry-compatible counters and histograms |
 | **Distributed tracing** | Activity/span integration for request tracing |
 | **Health checks** | `IHealthCheck` implementations for monitoring |
-| **Response caching** | ETag-based 304 responses, configurable Cache-Control |
-| **Query caching** | Optional `IDistributedCache` integration |
-| **Bulk operations** | Batch create/update/delete via `/bulk` endpoint |
-| **Async streaming** | `IAsyncEnumerable` support via `/stream` endpoint |
-| **Compiled queries** | Pre-compiled EF Core queries for common operations |
+| ***API Documentation & Discovery*** | |
 | **Schema endpoint** | `GET /api/$schema/{resource}` returns JSON Schema |
-| **HEAD support** | `HEAD` requests return count headers without body |
-| **Dynamic entities** | Runtime-defined resources without recompilation |
 
 ---
 

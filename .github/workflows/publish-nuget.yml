@@ -77,10 +77,7 @@ jobs:
             exit 1
           fi
 
-          dotnet nuget push "./artifacts/*.nupkg" \
-            --api-key "${{ secrets.NUGET_API_KEY }}" \
-            --source "https://api.nuget.org/v3/index.json" \
-            --skip-duplicate
+          dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate
 
       - name: Push symbols to NuGet.org (if any)
         shell: bash
@@ -92,7 +89,4 @@ jobs:
             exit 0
           fi
 
-          dotnet nuget push "./artifacts/*.snupkg" \
-            --api-key "${{ secrets.NUGET_API_KEY }}" \
-            --source "https://api.nuget.org/v3/index.json" \
-            --skip-duplicate
+          dotnet nuget push "./artifacts/*.snupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source "https://api.nuget.org/v3/index.json" --skip-duplicate

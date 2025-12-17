@@ -50,7 +50,8 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
         _logger.LogDebug("Bulk operation on {Resource}: {CreateCount} creates, {UpdateCount} updates, {DeleteCount} deletes",
             resourceKey, spec.Create.Count, spec.Update.Count, spec.Delete.Count);
 
-        var contract = _contracts.GetByResourceKey(resourceKey);
+        // Validate resource exists
+        _ = _contracts.GetByResourceKey(resourceKey);
 
         var created = new List<JsonObject>();
         var updated = new List<JsonObject>();

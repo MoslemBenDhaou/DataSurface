@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 

@@ -96,6 +96,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         {
             var result = await ov!(c, spec, expand, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
+            sw.Stop();
+            DataSurfaceTracing.RecordSuccess(activity, result.Items.Count);
+            _metrics?.RecordOperation(resourceKey, CrudOperation.List, sw.Elapsed.TotalMilliseconds, result.Items.Count);
             return result;
         }
 
@@ -171,6 +174,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         {
             var result = await ov!(c, id, expand, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
+            sw.Stop();
+            DataSurfaceTracing.RecordSuccess(activity, result is null ? 0 : 1);
+            _metrics?.RecordOperation(resourceKey, CrudOperation.Get, sw.Elapsed.TotalMilliseconds, result is null ? 0 : 1);
             return result;
         }
 
@@ -249,6 +255,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         {
             var result = await ov!(c, body, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
+            sw.Stop();
+            DataSurfaceTracing.RecordSuccess(activity);
+            _metrics?.RecordOperation(resourceKey, CrudOperation.Create, sw.Elapsed.TotalMilliseconds);
             return result;
         }
 
@@ -314,6 +323,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         {
             var result = await ov!(c, id, patch, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
+            sw.Stop();
+            DataSurfaceTracing.RecordSuccess(activity);
+            _metrics?.RecordOperation(resourceKey, CrudOperation.Update, sw.Elapsed.TotalMilliseconds);
             return result;
         }
 
@@ -385,6 +397,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         {
             await ov!(c, id, deleteSpec, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
+            sw.Stop();
+            DataSurfaceTracing.RecordSuccess(activity);
+            _metrics?.RecordOperation(resourceKey, CrudOperation.Delete, sw.Elapsed.TotalMilliseconds);
             return;
         }
 

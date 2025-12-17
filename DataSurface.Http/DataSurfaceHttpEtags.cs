@@ -20,19 +20,22 @@ public static class DataSurfaceHttpEtags
     /// <param name="c">The resource contract used to locate concurrency configuration.</param>
     /// <param name="body">The response body containing the concurrency field.</param>
     /// <param name="enabled">Whether ETag support is enabled.</param>
-    public static void TrySetEtag(HttpResponse res, ResourceContract c, JsonObject body, bool enabled)
+    /// <returns>The ETag value if set; otherwise <c>null</c>.</returns>
+    public static string? TrySetEtag(HttpResponse res, ResourceContract c, JsonObject body, bool enabled)
     {
-        if (!enabled) return;
+        if (!enabled) return null;
 
         var cc = c.Operations.TryGetValue(CrudOperation.Update, out var oc) ? oc.Concurrency : null;
-        if (cc is null || cc.Mode != ConcurrencyMode.RowVersion) return;
+        if (cc is null || cc.Mode != ConcurrencyMode.RowVersion) return null;
 
-        if (!body.TryGetPropertyValue(cc.FieldApiName, out var node) || node is null) return;
+        if (!body.TryGetPropertyValue(cc.FieldApiName, out var node) || node is null) return null;
 
         var token = node.ToJsonString().Trim('"');
-        if (string.IsNullOrWhiteSpace(token)) return;
+        if (string.IsNullOrWhiteSpace(token)) return null;
 
-        res.Headers.ETag = $"W/\"{token}\"";
+        var etag = $"W/\"{token}\"";
+        res.Headers.ETag = etag;
+        return etag;
     }
 
     // If-Match: W/"token" or "token" -> token

@@ -23,6 +23,7 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 - [Timestamps Convention](#timestamps-convention)
 - [Schema Endpoint](#schema-endpoint)
 - [Observability](#observability)
+- [Performance](#performance)
 - [Security](#security)
 - [Architecture](#architecture)
 
@@ -52,6 +53,11 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 | **Metrics** | OpenTelemetry-compatible counters and histograms |
 | **Distributed tracing** | Activity/span integration for request tracing |
 | **Health checks** | `IHealthCheck` implementations for monitoring |
+| **Response caching** | ETag-based 304 responses, configurable Cache-Control |
+| **Query caching** | Optional `IDistributedCache` integration |
+| **Bulk operations** | Batch create/update/delete via `/bulk` endpoint |
+| **Async streaming** | `IAsyncEnumerable` support via `/stream` endpoint |
+| **Compiled queries** | Pre-compiled EF Core queries for common operations |
 | **Schema endpoint** | `GET /api/$schema/{resource}` returns JSON Schema |
 | **HEAD support** | `HEAD` requests return count headers without body |
 | **Dynamic entities** | Runtime-defined resources without recompilation |
@@ -805,6 +811,113 @@ builder.Services.AddHealthChecks()
 - `DataSurfaceContractsHealthCheck` — Static contracts loaded
 - `DynamicMetadataHealthCheck` — Dynamic entity definitions table accessible
 - `DynamicContractsHealthCheck` — Dynamic contracts loaded
+
+---
+
+## Performance
+
+DataSurface provides several performance optimizations for high-throughput scenarios.
+
+### Response Caching
+
+Enable ETag-based conditional GET (304 Not Modified) and Cache-Control headers:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableConditionalGet = true,      // If-None-Match → 304 response
+    CacheControlMaxAgeSeconds = 300   // Cache-Control: max-age=300
+});
+```
+
+Clients can cache responses and send `If-None-Match` headers to receive 304 responses when data hasn't changed.
+
+### Query Result Caching
+
+Cache query results using `IDistributedCache`:
+
+```csharp
+// Add Redis cache
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = "localhost:6379";
+});
+
+// Configure DataSurface caching
+builder.Services.Configure<DataSurfaceCacheOptions>(options =>
+{
+    options.EnableQueryCaching = true;
+    options.DefaultCacheDuration = TimeSpan.FromMinutes(5);
+    options.ResourceConfigs["Product"] = new ResourceCacheConfig
+    {
+        Duration = TimeSpan.FromMinutes(30),
+        CacheList = true,
+        CacheGet = true
+    };
+});
+
+builder.Services.AddSingleton<IQueryResultCache, DistributedQueryResultCache>();
+```
+
+### Bulk Operations
+
+Batch create, update, and delete operations via `POST /api/{resource}/bulk`:
+
+```json
+{
+  "create": [
+    { "name": "User 1", "email": "user1@example.com" },
+    { "name": "User 2", "email": "user2@example.com" }
+  ],
+  "update": [
+    { "id": 5, "patch": { "name": "Updated Name" } }
+  ],
+  "delete": [10, 11, 12],
+  "stopOnError": true,
+  "useTransaction": true
+}
+```
+
+Register the bulk service:
+
+```csharp
+builder.Services.AddScoped<IDataSurfaceBulkService, EfDataSurfaceBulkService>();
+```
+
+### Async Streaming
+
+Stream large datasets via `GET /api/{resource}/stream` (NDJSON format):
+
+```csharp
+// Register streaming service
+builder.Services.AddScoped<IDataSurfaceStreamingService, EfDataSurfaceStreamingService>();
+
+// Client usage
+await foreach (var item in streamingService.StreamAsync("User", spec))
+{
+    // Process each item as it arrives
+}
+```
+
+Response format (newline-delimited JSON):
+```
+{"id":1,"name":"User 1"}
+{"id":2,"name":"User 2"}
+{"id":3,"name":"User 3"}
+```
+
+### Compiled Queries
+
+Pre-compiled EF Core queries for common operations:
+
+```csharp
+builder.Services.AddSingleton<CompiledQueryCache>();
+
+// Usage in custom code
+var cache = sp.GetRequiredService<CompiledQueryCache>();
+var findById = cache.GetOrCreateFindByIdQuery<User, int>("Id");
+var user = findById(dbContext, 5);
+```
 
 ---
 

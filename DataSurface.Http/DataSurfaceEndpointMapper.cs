@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using DataSurface.Dynamic.Contracts; // optional but recommended for dynamic catch-all
+using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Interfaces;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -263,6 +264,36 @@ public static class DataSurfaceEndpointMapper
 
             ApplyAuth(ep, c, CrudOperation.Delete, opt);
         }
+
+        // BULK - POST /api/{resource}/bulk
+        if (opt.EnableBulkOperations)
+        {
+            var ep = group.MapPost($"{route}/bulk", async (BulkOperationSpec spec, HttpRequest req, IServiceProvider sp, CancellationToken ct) =>
+            {
+                try { return await HandleBulk(c, spec, req, sp, opt, ct); }
+                catch (Exception ex) { return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext); }
+            })
+            .WithTags(c.Route)
+            .WithName($"{c.Route}.bulk")
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Create));
+
+            ApplyAuth(ep, c, CrudOperation.Create, opt);
+        }
+
+        // STREAM - GET /api/{resource}/stream
+        if (opt.EnableStreaming && c.Operations[CrudOperation.List].Enabled)
+        {
+            var ep = group.MapGet($"{route}/stream", (HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
+            {
+                try { return HandleStream(c, req, res, sp, opt, ct); }
+                catch (Exception ex) { return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext); }
+            })
+            .WithTags(c.Route)
+            .WithName($"{c.Route}.stream")
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
+
+            ApplyAuth(ep, c, CrudOperation.List, opt);
+        }
     }
 
     private static void ApplyAuth(RouteHandlerBuilder ep, ResourceContract c, CrudOperation op, DataSurfaceHttpOptions opt)
@@ -328,7 +359,23 @@ public static class DataSurfaceEndpointMapper
         var obj = await crud.GetAsync(c.ResourceKey, keyObj, expand, ct);
         if (obj is null) return Results.NotFound();
 
-        DataSurfaceHttpEtags.TrySetEtag(res, c, obj, opt.EnableEtags);
+        // Set ETag and check for conditional GET (304 Not Modified)
+        var etag = DataSurfaceHttpEtags.TrySetEtag(res, c, obj, opt.EnableEtags);
+        if (opt.EnableConditionalGet && etag is not null)
+        {
+            var ifNoneMatch = req.Headers.IfNoneMatch.FirstOrDefault();
+            if (ifNoneMatch is not null && ifNoneMatch.Trim('"') == etag.Trim('"'))
+            {
+                return Results.StatusCode(304);
+            }
+        }
+
+        // Set Cache-Control header if configured
+        if (opt.CacheControlMaxAgeSeconds > 0)
+        {
+            res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
+        }
+
         return Results.Ok(obj);
     }
 
@@ -374,6 +421,38 @@ public static class DataSurfaceEndpointMapper
         // Optional: If-Match could be enforced here too if you want delete concurrency.
         await crud.DeleteAsync(c.ResourceKey, keyObj, deleteSpec: null, ct);
         return Results.NoContent();
+    }
+
+    private static async Task<IResult> HandleBulk(ResourceContract c, BulkOperationSpec spec, HttpRequest req, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
+    {
+        var bulk = sp.GetRequiredService<IDataSurfaceBulkService>();
+        var result = await bulk.ExecuteAsync(c.ResourceKey, spec, ct);
+
+        if (result.Success)
+            return Results.Ok(result);
+
+        // Return 207 Multi-Status for partial failures
+        return Results.Json(result, statusCode: 207);
+    }
+
+    private static IResult HandleStream(ResourceContract c, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
+    {
+        var streaming = sp.GetRequiredService<IDataSurfaceStreamingService>();
+
+        var spec = DataSurfaceQueryParser.ParseQuerySpec(req, c);
+        var expand = DataSurfaceQueryParser.ParseExpand(req, c);
+
+        res.Headers.ContentType = "application/x-ndjson";
+        
+        return Results.Stream(async stream =>
+        {
+            var writer = new System.IO.StreamWriter(stream);
+            await foreach (var item in streaming.StreamAsync(c.ResourceKey, spec, expand, ct))
+            {
+                await writer.WriteLineAsync(item.ToJsonString());
+                await writer.FlushAsync();
+            }
+        }, contentType: "application/x-ndjson");
     }
 
     // ---------------------- helpers ----------------------

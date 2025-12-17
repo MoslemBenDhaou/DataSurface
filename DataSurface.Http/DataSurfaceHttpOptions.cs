@@ -57,4 +57,28 @@ public sealed class DataSurfaceHttpOptions
     /// Gets or sets whether to throw an exception when a route collision is detected during mapping.
     /// </summary>
     public bool ThrowOnRouteCollision { get; set; } = false;
+
+    // Bulk operations
+    /// <summary>
+    /// Gets or sets whether to map bulk operation endpoints (POST /api/{resource}/bulk).
+    /// </summary>
+    public bool EnableBulkOperations { get; set; } = true;
+
+    // Streaming
+    /// <summary>
+    /// Gets or sets whether to map streaming endpoints (GET /api/{resource}/stream).
+    /// </summary>
+    public bool EnableStreaming { get; set; } = true;
+
+    // Response caching
+    /// <summary>
+    /// Gets or sets the default Cache-Control max-age in seconds for GET responses.
+    /// Set to 0 to disable response caching headers.
+    /// </summary>
+    public int CacheControlMaxAgeSeconds { get; set; } = 0;
+
+    /// <summary>
+    /// Gets or sets whether to support If-None-Match headers for 304 responses on GET requests.
+    /// </summary>
+    public bool EnableConditionalGet { get; set; } = true;
 }

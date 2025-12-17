@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 
 namespace DataSurface.EFCore.Queries;
@@ -35,25 +34,8 @@ public sealed class CompiledQueryCache
         var cacheKey = $"{typeof(TEntity).FullName}:{keyPropertyName}:{typeof(TKey).Name}";
 
         return (Func<DbContext, TKey, TEntity?>)_findByIdQueries.GetOrAdd(cacheKey, _ =>
-        {
-            // Build expression: e => EF.Property<TKey>(e, keyPropertyName) == id
-            var entityParam = Expression.Parameter(typeof(TEntity), "e");
-            var idParam = Expression.Parameter(typeof(TKey), "id");
-            
-            var propertyAccess = Expression.Call(
-                typeof(EF),
-                nameof(EF.Property),
-                [typeof(TKey)],
-                entityParam,
-                Expression.Constant(keyPropertyName));
-            
-            var equals = Expression.Equal(propertyAccess, idParam);
-            var predicate = Expression.Lambda<Func<TEntity, TKey, bool>>(equals, entityParam, idParam);
-
-            // Compile the full query expression
-            return EF.CompileQuery((DbContext db, TKey id) =>
-                db.Set<TEntity>().FirstOrDefault(e => EF.Property<TKey>(e, keyPropertyName).Equals(id)));
-        });
+            EF.CompileQuery((DbContext db, TKey id) =>
+                db.Set<TEntity>().FirstOrDefault(e => EF.Property<TKey>(e, keyPropertyName)!.Equals(id))));
     }
 
     /// <summary>
@@ -84,7 +66,7 @@ public sealed class CompiledQueryCache
 
         return (Func<DbContext, TKey, bool>)_existsQueries.GetOrAdd(cacheKey, _ =>
             EF.CompileQuery((DbContext db, TKey id) =>
-                db.Set<TEntity>().Any(e => EF.Property<TKey>(e, keyPropertyName).Equals(id))));
+                db.Set<TEntity>().Any(e => EF.Property<TKey>(e, keyPropertyName)!.Equals(id))));
     }
 
     /// <summary>

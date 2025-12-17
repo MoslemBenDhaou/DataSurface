@@ -23,6 +23,7 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 - [Timestamps Convention](#timestamps-convention)
 - [Schema Endpoint](#schema-endpoint)
 - [Logging](#logging)
+- [Security](#security)
 - [Architecture](#architecture)
 
 ---
@@ -740,6 +741,134 @@ Both `EfDataSurfaceCrudService` and `DynamicDataSurfaceCrudService` emit structu
 
 ---
 
+## Security
+
+DataSurface provides extensible security features beyond endpoint-level authorization.
+
+### Row-Level Security
+
+Filter queries based on user context using `IResourceFilter<T>`:
+
+```csharp
+using DataSurface.EFCore.Interfaces;
+
+public class TenantResourceFilter : IResourceFilter<Order>
+{
+    private readonly ITenantContext _tenant;
+    
+    public TenantResourceFilter(ITenantContext tenant) => _tenant = tenant;
+    
+    public Expression<Func<Order, bool>>? GetFilter(ResourceContract contract)
+        => o => o.TenantId == _tenant.TenantId;
+}
+
+// Register
+builder.Services.AddScoped<IResourceFilter<Order>, TenantResourceFilter>();
+```
+
+- **Automatic application:** Filters apply to List, Get, Update, and Delete operations
+- **Security guarantee:** Users can only access records matching the filter
+- **Non-generic option:** Implement `IResourceFilter` for dynamic type filtering
+
+### Field-Level Authorization
+
+Control which fields users can read or write using `IFieldAuthorizer`:
+
+```csharp
+using DataSurface.EFCore.Interfaces;
+
+public class SensitiveFieldAuthorizer : IFieldAuthorizer
+{
+    private readonly IHttpContextAccessor _http;
+    
+    public SensitiveFieldAuthorizer(IHttpContextAccessor http) => _http = http;
+    
+    public bool CanReadField(ResourceContract contract, string fieldName)
+    {
+        if (fieldName == "salary")
+            return _http.HttpContext?.User.IsInRole("HR") ?? false;
+        return true;
+    }
+    
+    public bool CanWriteField(ResourceContract contract, string fieldName, CrudOperation op)
+    {
+        if (fieldName == "isAdmin")
+            return _http.HttpContext?.User.IsInRole("Admin") ?? false;
+        return true;
+    }
+}
+
+// Register
+builder.Services.AddScoped<IFieldAuthorizer, SensitiveFieldAuthorizer>();
+```
+
+- **Read redaction:** Unauthorized fields are removed from responses
+- **Write validation:** Unauthorized field writes throw `UnauthorizedAccessException`
+
+### Audit Logging
+
+Track all CRUD operations using `IAuditLogger`:
+
+```csharp
+using DataSurface.EFCore.Interfaces;
+
+public class DatabaseAuditLogger : IAuditLogger
+{
+    private readonly AppDbContext _db;
+    private readonly IHttpContextAccessor _http;
+    
+    public DatabaseAuditLogger(AppDbContext db, IHttpContextAccessor http)
+    {
+        _db = db;
+        _http = http;
+    }
+    
+    public async Task LogAsync(AuditLogEntry entry, CancellationToken ct)
+    {
+        _db.AuditLogs.Add(new AuditLog
+        {
+            UserId = _http.HttpContext?.User.FindFirst("sub")?.Value,
+            Operation = entry.Operation.ToString(),
+            ResourceKey = entry.ResourceKey,
+            EntityId = entry.EntityId,
+            Timestamp = entry.Timestamp,
+            Success = entry.Success,
+            Changes = entry.Changes?.ToJsonString(),
+            PreviousValues = entry.PreviousValues?.ToJsonString()
+        });
+        await _db.SaveChangesAsync(ct);
+    }
+}
+
+// Register
+builder.Services.AddScoped<IAuditLogger, DatabaseAuditLogger>();
+```
+
+**`AuditLogEntry` properties:**
+- `Operation` — The CRUD operation performed
+- `ResourceKey` — The resource being accessed
+- `EntityId` — The entity ID (if applicable)
+- `Timestamp` — UTC timestamp
+- `Success` — Whether the operation succeeded
+- `Changes` — JSON of fields written (create/update)
+- `PreviousValues` — JSON of previous values (update)
+
+### Enabling Security Features
+
+Register the security dispatcher to enable all security features:
+
+```csharp
+// Register security dispatcher
+builder.Services.AddScoped<CrudSecurityDispatcher>();
+
+// Register your security implementations
+builder.Services.AddScoped<IResourceFilter<Order>, TenantResourceFilter>();
+builder.Services.AddScoped<IFieldAuthorizer, SensitiveFieldAuthorizer>();
+builder.Services.AddScoped<IAuditLogger, DatabaseAuditLogger>();
+```
+
+---
+
 ## Architecture
 
 ```
@@ -785,6 +914,9 @@ Both `EfDataSurfaceCrudService` and `DynamicDataSurfaceCrudService` emit structu
 | `ICrudHook<T>` | Entity-specific lifecycle hooks |
 | `ITimestamped` | Auto-timestamp convention interface |
 | `ISoftDelete` | Soft-delete convention interface |
+| `IResourceFilter<T>` | Row-level security filtering |
+| `IFieldAuthorizer` | Field-level read/write authorization |
+| `IAuditLogger` | CRUD operation audit logging |
 
 ---
 

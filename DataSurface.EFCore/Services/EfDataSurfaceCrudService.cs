@@ -26,6 +26,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly CrudHookDispatcher _hooks;
     private readonly CrudOverrideRegistry _overrides;
     private readonly ILogger<EfDataSurfaceCrudService> _logger;
+    private readonly CrudSecurityDispatcher? _security;
 
     /// <summary>
     /// Creates a new CRUD service.
@@ -46,7 +47,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         IServiceProvider sp,
         CrudHookDispatcher hooks,
         CrudOverrideRegistry overrides,
-        ILogger<EfDataSurfaceCrudService> logger)
+        ILogger<EfDataSurfaceCrudService> logger,
+        CrudSecurityDispatcher? security = null)
     {
         _db = db;
         _contracts = contracts;
@@ -56,6 +58,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _hooks = hooks;
         _overrides = overrides;
         _logger = logger;
+        _security = security;
     }
 
     /// <inheritdoc />
@@ -90,7 +93,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var (clrType, set) = ResolveSet(c);
 
-        var baseQuery = ApplyExpand(set, c, expand);
+        // Apply row-level security filter
+        var filteredSet = _security is not null 
+            ? _security.ApplyResourceFilter(set, clrType, c) 
+            : set;
+
+        var baseQuery = ApplyExpand(filteredSet, c, expand);
         var shaped = ApplyQuerySpec(baseQuery, clrType, c, spec);
 
         var total = await CountAsync(baseQuery, ct);
@@ -102,7 +110,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var json = pageItems.Select(e => EntityToJson(e, c, expand)).ToList();
 
+        // Apply field-level authorization (redact unauthorized fields)
+        _security?.RedactUnauthorizedFields(c, json);
+
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        // Audit logging for list operation
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.List, resourceKey), ct);
 
         _logger.LogDebug("List {Resource} completed in {ElapsedMs}ms, returned {Count}/{Total} items",
             resourceKey, sw.ElapsedMilliseconds, json.Count, total);
@@ -145,7 +160,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         var (clrType, set) = ResolveSet(c);
-        var q = ApplyExpand(set, c, expand);
+
+        // Apply row-level security filter
+        var filteredSet = _security is not null 
+            ? _security.ApplyResourceFilter(set, clrType, c) 
+            : set;
+
+        var q = ApplyExpand(filteredSet, c, expand);
 
         var entity = await FindByIdAsync(q, clrType, c, id, ct);
         if (entity is null)
@@ -158,7 +179,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var json = EntityToJson(entity, c, expand);
 
+        // Apply field-level authorization (redact unauthorized fields)
+        _security?.RedactUnauthorizedFields(c, json);
+
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        // Audit logging
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Get, resourceKey, id.ToString()), ct);
 
         _logger.LogDebug("Get {Resource} id={Id} completed in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
@@ -181,6 +209,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         EnsureEnabled(c, CrudOperation.Create);
 
         ValidateBody(c, CrudOperation.Create, body);
+
+        // Validate field-level write authorization
+        _security?.ValidateFieldWriteAuthorization(c, body, CrudOperation.Create);
 
         var hookCtx = NewHookCtx(c, CrudOperation.Create);
         var svcCtx = NewSvcCtx();
@@ -208,6 +239,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.AfterGlobalAsync(hookCtx);
 
+        // Audit logging
+        if (_security is not null)
+        {
+            var keyVal = GetEntityKeyValue(entity, c);
+            await _security.LogAuditAsync(_security.CreateAuditEntry(
+                CrudOperation.Create, resourceKey, keyVal?.ToString(), changes: body), ct);
+        }
+
         _logger.LogInformation("Created {Resource} in {ElapsedMs}ms", resourceKey, sw.ElapsedMilliseconds);
         return json;
     }
@@ -230,6 +269,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         EnsureEnabled(c, CrudOperation.Update);
         ValidateBody(c, CrudOperation.Update, patch);
 
+        // Validate field-level write authorization
+        _security?.ValidateFieldWriteAuthorization(c, patch, CrudOperation.Update);
+
         var hookCtx = NewHookCtx(c, CrudOperation.Update);
         var svcCtx = NewSvcCtx();
 
@@ -243,7 +285,16 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         var (clrType, set) = ResolveSet(c);
-        var entity = await FindByIdAsync(set, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
+
+        // Apply row-level security filter
+        var filteredSet = _security is not null 
+            ? _security.ApplyResourceFilter(set, clrType, c) 
+            : set;
+
+        var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
+
+        // Capture previous values for audit
+        var previousValues = _security is not null ? EntityToJson(entity, c, expand: null) : null;
 
         await InvokeTypedBeforeUpdate(entity, patch, hookCtx);
 
@@ -255,6 +306,11 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var json = EntityToJson(entity, c, expand: null);
 
         await _hooks.AfterGlobalAsync(hookCtx);
+
+        // Audit logging
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(
+                CrudOperation.Update, resourceKey, id.ToString(), changes: patch, previousValues: previousValues), ct);
 
         _logger.LogInformation("Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
@@ -289,7 +345,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         var (clrType, set) = ResolveSet(c);
-        var entity = await FindByIdAsync(set, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
+
+        // Apply row-level security filter
+        var filteredSet = _security is not null 
+            ? _security.ApplyResourceFilter(set, clrType, c) 
+            : set;
+
+        var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
 
         await InvokeTypedBeforeDelete(entity, hookCtx);
 
@@ -303,6 +365,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             await InvokeTypedAfterDelete(entity, hookCtx);
             await _hooks.AfterGlobalAsync(hookCtx);
 
+            // Audit logging
+            if (_security is not null)
+                await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
+
             _logger.LogInformation("Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
@@ -313,6 +379,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         await InvokeTypedAfterDelete(entity, hookCtx);
         await _hooks.AfterGlobalAsync(hookCtx);
 
+        // Audit logging
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
+
         _logger.LogInformation("Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }
 
@@ -322,6 +392,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     {
         if (!c.Operations.TryGetValue(op, out var oc) || !oc.Enabled)
             throw new InvalidOperationException($"Operation '{op}' is disabled for resource '{c.ResourceKey}'.");
+    }
+
+    private static object? GetEntityKeyValue(object entity, ResourceContract c)
+    {
+        var prop = entity.GetType().GetProperty(c.Key.Name);
+        return prop?.GetValue(entity);
     }
     
     private Task InvokeTypedAfterRead(object entity, CrudHookContext ctx)

@@ -175,6 +175,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             return null;
         }
 
+        // Resource-level authorization check
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, entity, clrType, CrudOperation.Get, ct);
+
         await InvokeTypedAfterRead(entity, hookCtx);
 
         var json = EntityToJson(entity, c, expand);
@@ -293,6 +297,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
 
+        // Resource-level authorization check
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, entity, clrType, CrudOperation.Update, ct);
+
         // Capture previous values for audit
         var previousValues = _security is not null ? EntityToJson(entity, c, expand: null) : null;
 
@@ -352,6 +360,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             : set;
 
         var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
+
+        // Resource-level authorization check
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, entity, clrType, CrudOperation.Delete, ct);
 
         await InvokeTypedBeforeDelete(entity, hookCtx);
 

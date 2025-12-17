@@ -40,6 +40,10 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 | **Expansion** | `expand=relation` with depth limits |
 | **Concurrency** | Row version + `ETag` / `If-Match` headers |
 | **Authorization** | Per-operation policy names |
+| **Row-level security** | `IResourceFilter<T>` for tenant/user-based query filtering |
+| **Resource authorization** | `IResourceAuthorizer<T>` for instance-level access control |
+| **Field authorization** | `IFieldAuthorizer` for field-level read/write control |
+| **Audit logging** | `IAuditLogger` for tracking all CRUD operations |
 | **Hooks** | Global and entity-specific lifecycle hooks |
 | **Overrides** | Replace any CRUD operation with custom logic |
 | **Soft delete** | Built-in `ISoftDelete` convention support |
@@ -805,6 +809,86 @@ builder.Services.AddScoped<IFieldAuthorizer, SensitiveFieldAuthorizer>();
 - **Read redaction:** Unauthorized fields are removed from responses
 - **Write validation:** Unauthorized field writes throw `UnauthorizedAccessException`
 
+### Resource-Level Authorization
+
+Authorize access to specific resource instances using `IResourceAuthorizer<T>`:
+
+```csharp
+using DataSurface.EFCore.Interfaces;
+
+public class OrderAuthorizer : IResourceAuthorizer<Order>
+{
+    private readonly IHttpContextAccessor _http;
+    
+    public OrderAuthorizer(IHttpContextAccessor http) => _http = http;
+    
+    public Task<AuthorizationResult> AuthorizeAsync(
+        ResourceContract contract,
+        Order? entity,
+        CrudOperation operation,
+        CancellationToken ct)
+    {
+        var userId = _http.HttpContext?.User.FindFirst("sub")?.Value;
+        
+        // Owner can do anything with their orders
+        if (entity?.OwnerId == userId)
+            return Task.FromResult(AuthorizationResult.Success());
+        
+        // Admins can access all orders
+        if (_http.HttpContext?.User.IsInRole("Admin") == true)
+            return Task.FromResult(AuthorizationResult.Success());
+        
+        return Task.FromResult(AuthorizationResult.Fail("You can only access your own orders."));
+    }
+}
+
+// Register
+builder.Services.AddScoped<IResourceAuthorizer<Order>, OrderAuthorizer>();
+```
+
+**Integration with ASP.NET Core Authorization:**
+
+```csharp
+public class PolicyResourceAuthorizer : IResourceAuthorizer
+{
+    private readonly IAuthorizationService _auth;
+    private readonly IHttpContextAccessor _http;
+    
+    public PolicyResourceAuthorizer(IAuthorizationService auth, IHttpContextAccessor http)
+    {
+        _auth = auth;
+        _http = http;
+    }
+    
+    public async Task<AuthorizationResult> AuthorizeAsync(
+        ResourceContract contract,
+        object? entity,
+        CrudOperation operation,
+        CancellationToken ct)
+    {
+        var user = _http.HttpContext?.User;
+        if (user is null)
+            return AuthorizationResult.Fail("No authenticated user.");
+        
+        // Use ASP.NET Core policy-based authorization with resource
+        var policyName = $"{contract.ResourceKey}.{operation}";
+        var result = await _auth.AuthorizeAsync(user, entity, policyName);
+        
+        return result.Succeeded 
+            ? AuthorizationResult.Success() 
+            : AuthorizationResult.Fail("Access denied by policy.");
+    }
+}
+
+// Register
+builder.Services.AddScoped<IResourceAuthorizer, PolicyResourceAuthorizer>();
+```
+
+- **Instance-level checks:** "Can this user access Order #123?"
+- **Operation-specific:** Different rules for Get vs Update vs Delete
+- **Typed and non-generic:** Use `IResourceAuthorizer<T>` for compile-time safety or `IResourceAuthorizer` for global policies
+- **Integrates with ASP.NET Core:** Leverage existing `IAuthorizationService` and policies
+
 ### Audit Logging
 
 Track all CRUD operations using `IAuditLogger`:
@@ -915,6 +999,7 @@ builder.Services.AddScoped<IAuditLogger, DatabaseAuditLogger>();
 | `ITimestamped` | Auto-timestamp convention interface |
 | `ISoftDelete` | Soft-delete convention interface |
 | `IResourceFilter<T>` | Row-level security filtering |
+| `IResourceAuthorizer<T>` | Resource instance authorization |
 | `IFieldAuthorizer` | Field-level read/write authorization |
 | `IAuditLogger` | CRUD operation audit logging |
 

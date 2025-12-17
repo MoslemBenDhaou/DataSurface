@@ -8,7 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace DataSurface.EFCore.Services;
 
 /// <summary>
-/// Dispatches security-related operations including row-level filtering, field authorization, and audit logging.
+/// Dispatches security-related operations including row-level filtering, field authorization, resource authorization, and audit logging.
 /// </summary>
 public sealed class CrudSecurityDispatcher
 {
@@ -78,6 +78,65 @@ public sealed class CrudSecurityDispatcher
         where TEntity : class
     {
         return ApplyResourceFilter((IQueryable<TEntity>)query, contract);
+    }
+
+    /// <summary>
+    /// Authorizes access to a specific resource instance.
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <param name="contract">The resource contract.</param>
+    /// <param name="entity">The entity instance (null for Create/List).</param>
+    /// <param name="operation">The CRUD operation.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="UnauthorizedAccessException">Thrown when authorization fails.</exception>
+    public async Task AuthorizeResourceAsync<TEntity>(
+        ResourceContract contract,
+        TEntity? entity,
+        CrudOperation operation,
+        CancellationToken ct = default) where TEntity : class
+    {
+        // Try typed authorizer first
+        var typedAuth = _sp.GetService<IResourceAuthorizer<TEntity>>();
+        if (typedAuth is not null)
+        {
+            var result = await typedAuth.AuthorizeAsync(contract, entity, operation, ct);
+            if (!result.Succeeded)
+                throw new UnauthorizedAccessException(result.FailureReason ?? "Access denied.");
+            return;
+        }
+
+        // Then try non-generic authorizer
+        var globalAuth = _sp.GetService<IResourceAuthorizer>();
+        if (globalAuth is not null)
+        {
+            var result = await globalAuth.AuthorizeAsync(contract, entity, operation, ct);
+            if (!result.Succeeded)
+                throw new UnauthorizedAccessException(result.FailureReason ?? "Access denied.");
+        }
+    }
+
+    /// <summary>
+    /// Authorizes access to a specific resource instance (non-generic).
+    /// </summary>
+    /// <param name="contract">The resource contract.</param>
+    /// <param name="entity">The entity instance (null for Create/List).</param>
+    /// <param name="entityType">The entity type.</param>
+    /// <param name="operation">The CRUD operation.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="UnauthorizedAccessException">Thrown when authorization fails.</exception>
+    public async Task AuthorizeResourceAsync(
+        ResourceContract contract,
+        object? entity,
+        Type entityType,
+        CrudOperation operation,
+        CancellationToken ct = default)
+    {
+        // Use reflection to call the generic version
+        var method = typeof(CrudSecurityDispatcher)
+            .GetMethod(nameof(AuthorizeResourceAsync), 1, [typeof(ResourceContract), Type.MakeGenericMethodParameter(0), typeof(CrudOperation), typeof(CancellationToken)])!
+            .MakeGenericMethod(entityType);
+
+        await (Task)method.Invoke(this, [contract, entity, operation, ct])!;
     }
 
     /// <summary>

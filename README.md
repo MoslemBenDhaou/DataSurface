@@ -4,6 +4,9 @@
 
 DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoints from a single source of truth: the **ResourceContract**. Define your resources once using C# attributes or database metadata, and get automatic validation, filtering, sorting, pagination, and more.
 
+[![Publish NuGet](https://github.com/MoslemBenDhaou/DataSurface/actions/workflows/publish-nuget.yml/badge.svg)](https://github.com/MoslemBenDhaou/DataSurface/actions/workflows/publish-nuget.yml)
+
+
 ---
 
 ## Table of Contents
@@ -66,15 +69,15 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 
 ## Packages
 
-| Package | Purpose |
-|---------|---------|
-| `DataSurface.Core` | Contracts, attributes, and builders |
-| `DataSurface.EFCore` | EF Core CRUD service, hooks, query engine |
-| `DataSurface.Dynamic` | Runtime metadata storage, dynamic CRUD service |
-| `DataSurface.Http` | Minimal API endpoint mapping, query parsing, ETags |
-| `DataSurface.Admin` | Admin endpoints for managing dynamic entities |
-| `DataSurface.OpenApi` | Swashbuckle integration for typed schemas |
-| `DataSurface.Generator` | *(Optional)* Source generator for typed DTOs |
+| Package | Purpose | Download |
+|---------|---------|----------|
+| `DataSurface.Core` | Contracts, attributes, and builders | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Core.svg)](https://www.nuget.org/packages/DataSurface.Core) |
+| `DataSurface.EFCore` | EF Core CRUD service, hooks, query engine | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.EFCore.svg)](https://www.nuget.org/packages/DataSurface.EFCore) |
+| `DataSurface.Dynamic` | Runtime metadata storage, dynamic CRUD service | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Dynamic.svg)](https://www.nuget.org/packages/DataSurface.Dynamic) |
+| `DataSurface.Http` | Minimal API endpoint mapping, query parsing, ETags | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Http.svg)](https://www.nuget.org/packages/DataSurface.Http) |
+| `DataSurface.Admin` | Admin endpoints for managing dynamic entities | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Admin.svg)](https://www.nuget.org/packages/DataSurface.Admin) |
+| `DataSurface.OpenApi` | Swashbuckle integration for typed schemas | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.OpenApi.svg)](https://www.nuget.org/packages/DataSurface.OpenApi) |
+| `DataSurface.Generator` | *(Optional)* Source generator for typed DTOs | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Generator.svg)](https://www.nuget.org/packages/DataSurface.Generator) |
 
 **Typical combinations:**
 - **Static only:** `Core` + `EFCore` + `Http`

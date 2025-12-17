@@ -8,6 +8,7 @@ using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Exceptions;
 using DataSurface.EFCore.Interfaces;
 using DataSurface.EFCore.Mapper;
+using DataSurface.EFCore.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -27,6 +28,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly CrudOverrideRegistry _overrides;
     private readonly ILogger<EfDataSurfaceCrudService> _logger;
     private readonly CrudSecurityDispatcher? _security;
+    private readonly DataSurfaceMetrics? _metrics;
 
     /// <summary>
     /// Creates a new CRUD service.
@@ -48,7 +50,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         CrudHookDispatcher hooks,
         CrudOverrideRegistry overrides,
         ILogger<EfDataSurfaceCrudService> logger,
-        CrudSecurityDispatcher? security = null)
+        CrudSecurityDispatcher? security = null,
+        DataSurfaceMetrics? metrics = null)
     {
         _db = db;
         _contracts = contracts;
@@ -59,6 +62,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _overrides = overrides;
         _logger = logger;
         _security = security;
+        _metrics = metrics;
     }
 
     /// <inheritdoc />
@@ -74,6 +78,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         string resourceKey, QuerySpec spec, ExpandSpec? expand = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
+        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List);
+        DataSurfaceTracing.AddQueryParameters(activity, spec.Page, spec.PageSize, spec.Filters?.Count ?? 0, string.IsNullOrEmpty(spec.Sort) ? 0 : spec.Sort.Split(',').Length);
+        DataSurfaceTracing.AddExpandInfo(activity, expand?.Expand);
+
         _logger.LogDebug("List {Resource} page={Page} pageSize={PageSize}", resourceKey, spec.Page, spec.PageSize);
 
         var c = _contracts.GetByResourceKey(resourceKey);
@@ -119,6 +127,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_security is not null)
             await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.List, resourceKey), ct);
 
+        sw.Stop();
+        DataSurfaceTracing.RecordSuccess(activity, json.Count);
+        _metrics?.RecordOperation(resourceKey, CrudOperation.List, sw.Elapsed.TotalMilliseconds, json.Count);
+
         _logger.LogDebug("List {Resource} completed in {ElapsedMs}ms, returned {Count}/{Total} items",
             resourceKey, sw.ElapsedMilliseconds, json.Count, total);
 
@@ -142,6 +154,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         string resourceKey, object id, ExpandSpec? expand = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
+        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Get, id);
+        DataSurfaceTracing.AddExpandInfo(activity, expand?.Expand);
+
         _logger.LogDebug("Get {Resource} id={Id}", resourceKey, id);
 
         var c = _contracts.GetByResourceKey(resourceKey);
@@ -172,6 +187,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (entity is null)
         {
             await _hooks.AfterGlobalAsync(hookCtx);
+            sw.Stop();
+            _metrics?.RecordOperation(resourceKey, CrudOperation.Get, sw.Elapsed.TotalMilliseconds, 0);
             return null;
         }
 
@@ -192,6 +209,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_security is not null)
             await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Get, resourceKey, id.ToString()), ct);
 
+        sw.Stop();
+        DataSurfaceTracing.RecordSuccess(activity);
+        _metrics?.RecordOperation(resourceKey, CrudOperation.Get, sw.Elapsed.TotalMilliseconds);
+
         _logger.LogDebug("Get {Resource} id={Id} completed in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
     }
@@ -207,6 +228,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task<JsonObject> CreateAsync(string resourceKey, JsonObject body, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
+        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Create);
+
         _logger.LogDebug("Create {Resource}", resourceKey);
 
         var c = _contracts.GetByResourceKey(resourceKey);
@@ -251,6 +274,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 CrudOperation.Create, resourceKey, keyVal?.ToString(), changes: body), ct);
         }
 
+        sw.Stop();
+        DataSurfaceTracing.RecordSuccess(activity);
+        _metrics?.RecordOperation(resourceKey, CrudOperation.Create, sw.Elapsed.TotalMilliseconds);
+
         _logger.LogInformation("Created {Resource} in {ElapsedMs}ms", resourceKey, sw.ElapsedMilliseconds);
         return json;
     }
@@ -267,6 +294,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task<JsonObject> UpdateAsync(string resourceKey, object id, JsonObject patch, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
+        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Update, id);
+
         _logger.LogDebug("Update {Resource} id={Id}", resourceKey, id);
 
         var c = _contracts.GetByResourceKey(resourceKey);
@@ -320,6 +349,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             await _security.LogAuditAsync(_security.CreateAuditEntry(
                 CrudOperation.Update, resourceKey, id.ToString(), changes: patch, previousValues: previousValues), ct);
 
+        sw.Stop();
+        DataSurfaceTracing.RecordSuccess(activity);
+        _metrics?.RecordOperation(resourceKey, CrudOperation.Update, sw.Elapsed.TotalMilliseconds);
+
         _logger.LogInformation("Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
     }
@@ -335,6 +368,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task DeleteAsync(string resourceKey, object id, CrudDeleteSpec? deleteSpec = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
+        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Delete, id);
+        activity?.SetTag("datasurface.hard_delete", deleteSpec?.HardDelete ?? false);
+
         _logger.LogDebug("Delete {Resource} id={Id} hard={Hard}", resourceKey, id, deleteSpec?.HardDelete ?? false);
 
         var c = _contracts.GetByResourceKey(resourceKey);
@@ -381,6 +417,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             if (_security is not null)
                 await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
 
+            sw.Stop();
+            DataSurfaceTracing.RecordSuccess(activity);
+            _metrics?.RecordOperation(resourceKey, CrudOperation.Delete, sw.Elapsed.TotalMilliseconds);
+
             _logger.LogInformation("Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
@@ -394,6 +434,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // Audit logging
         if (_security is not null)
             await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
+
+        sw.Stop();
+        DataSurfaceTracing.RecordSuccess(activity);
+        _metrics?.RecordOperation(resourceKey, CrudOperation.Delete, sw.Elapsed.TotalMilliseconds);
 
         _logger.LogInformation("Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }

@@ -22,7 +22,7 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 - [Configuration Options](#configuration-options)
 - [Timestamps Convention](#timestamps-convention)
 - [Schema Endpoint](#schema-endpoint)
-- [Logging](#logging)
+- [Observability](#observability)
 - [Security](#security)
 - [Architecture](#architecture)
 
@@ -49,6 +49,9 @@ DataSurface eliminates CRUD boilerplate by generating fully-featured HTTP endpoi
 | **Soft delete** | Built-in `ISoftDelete` convention support |
 | **Timestamps** | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
 | **Structured logging** | Built-in `ILogger` integration with operation timing |
+| **Metrics** | OpenTelemetry-compatible counters and histograms |
+| **Distributed tracing** | Activity/span integration for request tracing |
+| **Health checks** | `IHealthCheck` implementations for monitoring |
 | **Schema endpoint** | `GET /api/$schema/{resource}` returns JSON Schema |
 | **HEAD support** | `HEAD` requests return count headers without body |
 | **Dynamic entities** | Runtime-defined resources without recompilation |
@@ -721,7 +724,11 @@ Useful for:
 
 ---
 
-## Logging
+## Observability
+
+DataSurface provides comprehensive observability features including structured logging, metrics, tracing, and health checks.
+
+### Structured Logging
 
 Both `EfDataSurfaceCrudService` and `DynamicDataSurfaceCrudService` emit structured logs:
 
@@ -742,6 +749,62 @@ Both `EfDataSurfaceCrudService` and `DynamicDataSurfaceCrudService` emit structu
 - `{Id}` — Entity ID (when applicable)
 - `{ElapsedMs}` — Operation duration
 - `{Count}` / `{Total}` — List result counts
+
+### Metrics
+
+OpenTelemetry-compatible metrics via `DataSurfaceMetrics`:
+
+```csharp
+// Register metrics
+builder.Services.AddSingleton<DataSurfaceMetrics>();
+
+// Configure OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics.AddMeter("DataSurface"));
+```
+
+**Available metrics:**
+| Metric | Type | Description |
+|--------|------|-------------|
+| `datasurface.operations` | Counter | Total CRUD operations by resource and operation |
+| `datasurface.errors` | Counter | Failed operations by resource, operation, and error type |
+| `datasurface.operation.duration` | Histogram | Operation duration in milliseconds |
+| `datasurface.rows_affected` | Counter | Rows affected by operations |
+
+### Distributed Tracing
+
+Activity/span integration via `DataSurfaceTracing`:
+
+```csharp
+// Configure OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddSource("DataSurface"));
+```
+
+**Trace attributes:**
+- `datasurface.resource` — Resource key
+- `datasurface.operation` — CRUD operation
+- `datasurface.entity_id` — Entity ID (when applicable)
+- `datasurface.rows_affected` — Rows returned/affected
+- `datasurface.query.*` — Query parameters (page, page_size, filter_count, sort_count)
+
+### Health Checks
+
+Built-in `IHealthCheck` implementations:
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddCheck<DataSurfaceDbHealthCheck>("datasurface-db")
+    .AddCheck<DataSurfaceContractsHealthCheck>("datasurface-contracts")
+    .AddCheck<DynamicMetadataHealthCheck>("datasurface-dynamic-metadata")
+    .AddCheck<DynamicContractsHealthCheck>("datasurface-dynamic-contracts");
+```
+
+**Health checks:**
+- `DataSurfaceDbHealthCheck` — Database connectivity
+- `DataSurfaceContractsHealthCheck` — Static contracts loaded
+- `DynamicMetadataHealthCheck` — Dynamic entity definitions table accessible
+- `DynamicContractsHealthCheck` — Dynamic contracts loaded
 
 ---
 

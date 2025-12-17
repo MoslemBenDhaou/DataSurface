@@ -68,10 +68,19 @@ jobs:
           ls -la ./artifacts/*.snupkg 2>/dev/null || true
 
       - name: Push packages to NuGet.org
-        run: dotnet nuget push "./artifacts/*.nupkg" \
-              --api-key "${{ secrets.NUGET_API_KEY }}" \
-              --source "https://api.nuget.org/v3/index.json" \
-              --skip-duplicate
+        shell: bash
+        run: |
+          shopt -s nullglob
+          pkgs=(./artifacts/*.nupkg)
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "No .nupkg found in ./artifacts"
+            exit 1
+          fi
+
+          dotnet nuget push "./artifacts/*.nupkg" \
+            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --source "https://api.nuget.org/v3/index.json" \
+            --skip-duplicate
 
       - name: Push symbols to NuGet.org (if any)
         shell: bash

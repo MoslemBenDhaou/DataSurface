@@ -32,49 +32,6 @@ All without writing DTOs, controllers, or repetitive glue code.
 - Explicit security rules
 - Override hooks when you *do* need custom logic
 
-## Table of Contents
-
-- [Features](#features)
-- [Packages](#packages)
-- [Quick Start](#quick-start)
-- [Guides](#guides)
-  - [Static Resources (EF Core)](#guide-static-resources-ef-core)
-  - [Dynamic Resources (Runtime Metadata)](#guide-dynamic-resources-runtime-metadata)
-  - [Admin Endpoints](#guide-admin-endpoints)
-  - [OpenAPI / Swagger](#guide-openapi--swagger)
-- [Feature Details](#auto-generated-endpoints)
-  - [Auto-generated Endpoints](#auto-generated-endpoints)
-  - [Field-level Control](#field-level-control)
-  - [Validation](#validation)
-  - [Soft Delete](#soft-delete)
-  - [Timestamps](#timestamps)
-  - [Filtering & Sorting](#filtering--sorting)
-  - [Pagination](#pagination)
-  - [Expansion](#expansion)
-  - [HEAD Support](#head-support)
-  - [Authorization](#authorization)
-  - [Row-level Security](#row-level-security)
-  - [Resource Authorization](#resource-authorization)
-  - [Field Authorization](#field-authorization)
-  - [Concurrency](#concurrency)
-  - [Hooks](#hooks)
-  - [Overrides](#overrides)
-  - [Dynamic Entities](#dynamic-entities)
-  - [Compiled Queries](#compiled-queries)
-  - [Query Caching](#query-caching)
-  - [Response Caching](#response-caching)
-  - [Bulk Operations](#bulk-operations)
-  - [Async Streaming](#async-streaming)
-  - [Audit Logging](#audit-logging)
-  - [Structured Logging](#structured-logging)
-  - [Metrics](#metrics)
-  - [Distributed Tracing](#distributed-tracing)
-  - [Health Checks](#health-checks)
-  - [Schema Endpoint](#schema-endpoint)
-- [Attributes Reference](#attributes-reference)
-- [Configuration Options](#configuration-options)
-- [Architecture](#architecture)
-
 ## Why DataSurface?
 
 Most ASP.NET Core applications repeat the same pattern:
@@ -97,56 +54,6 @@ The result:
 - Less drift between layers
 - Consistent behavior across all resources
 - Faster iteration without sacrificing control
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| [**Auto-generated endpoints**](#auto-generated-endpoints) | `GET`, `POST`, `PATCH`, `DELETE` via Minimal APIs |
-| [**Field-level control**](#field-level-control) | Choose which fields appear in read/create/update DTOs |
-| [**Validation**](#validation) | Required fields, immutable fields, unknown field rejection |
-| [**Soft delete**](#soft-delete) | Built-in `ISoftDelete` convention support |
-| [**Timestamps**](#timestamps) | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
-| [**Filtering & Sorting**](#filtering--sorting) | Allowlisted fields with operators (`eq`, `gt`, `contains`, etc.) |
-| [**Pagination**](#pagination) | Built-in `page` + `pageSize` with configurable max |
-| [**Expansion**](#expansion) | `expand=relation` with depth limits |
-| [**HEAD support**](#head-support) | `HEAD` requests return count headers without body |
-| [**Authorization**](#authorization) | Per-operation policy names |
-| [**Row-level security**](#row-level-security) | `IResourceFilter<T>` for tenant/user-based query filtering |
-| [**Resource authorization**](#resource-authorization) | `IResourceAuthorizer<T>` for instance-level access control |
-| [**Field authorization**](#field-authorization) | `IFieldAuthorizer` for field-level read/write control |
-| [**Concurrency**](#concurrency) | Row version + `ETag` / `If-Match` headers |
-| [**Hooks**](#hooks) | Global and entity-specific lifecycle hooks |
-| [**Overrides**](#overrides) | Replace any CRUD operation with custom logic |
-| [**Dynamic entities**](#dynamic-entities) | Runtime-defined resources without recompilation |
-| [**Compiled queries**](#compiled-queries) | Pre-compiled EF Core queries for common operations |
-| [**Query caching**](#query-caching) | Optional `IDistributedCache` integration |
-| [**Response caching**](#response-caching) | ETag-based 304 responses, configurable Cache-Control |
-| [**Bulk operations**](#bulk-operations) | Batch create/update/delete via `/bulk` endpoint |
-| [**Async streaming**](#async-streaming) | `IAsyncEnumerable` support via `/stream` endpoint |
-| [**Audit logging**](#audit-logging) | `IAuditLogger` for tracking all CRUD operations |
-| [**Structured logging**](#structured-logging) | Built-in `ILogger` integration with operation timing |
-| [**Metrics**](#metrics) | OpenTelemetry-compatible counters and histograms |
-| [**Distributed tracing**](#distributed-tracing) | Activity/span integration for request tracing |
-| [**Health checks**](#health-checks) | `IHealthCheck` implementations for monitoring |
-| [**Schema endpoint**](#schema-endpoint) | `GET /api/$schema/{resource}` returns JSON Schema |
-
-## Packages
-
-| Package | Purpose | Download |
-|---------|---------|----------|
-| `DataSurface.Core` | Contracts, attributes, and builders | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Core.svg)](https://www.nuget.org/packages/DataSurface.Core) |
-| `DataSurface.EFCore` | EF Core CRUD service, hooks, query engine | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.EFCore.svg)](https://www.nuget.org/packages/DataSurface.EFCore) |
-| `DataSurface.Dynamic` | Runtime metadata storage, dynamic CRUD service | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Dynamic.svg)](https://www.nuget.org/packages/DataSurface.Dynamic) |
-| `DataSurface.Http` | Minimal API endpoint mapping, query parsing, ETags | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Http.svg)](https://www.nuget.org/packages/DataSurface.Http) |
-| `DataSurface.Admin` | Admin endpoints for managing dynamic entities | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Admin.svg)](https://www.nuget.org/packages/DataSurface.Admin) |
-| `DataSurface.OpenApi` | Swashbuckle integration for typed schemas | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.OpenApi.svg)](https://www.nuget.org/packages/DataSurface.OpenApi) |
-| `DataSurface.Generator` | *(Optional)* Source generator for typed DTOs | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Generator.svg)](https://www.nuget.org/packages/DataSurface.Generator) |
-
-**Typical combinations:**
-- **Static only:** `Core` + `EFCore` + `Http`
-- **Dynamic only:** `Core` + `Dynamic` + `Http` + `Admin`
-- **Both:** All of the above
 
 ## Before vs After
 
@@ -236,6 +143,99 @@ No controllers. No HTTP. Same guarantees.
 
 DataSurface is not a replacement for custom business logic —
 it **handles the 80% so you can focus on the 20%**.
+
+## Table of Contents
+
+- [Features](#features)
+- [Packages](#packages)
+- [Quick Start](#quick-start)
+- [Guides](#guides)
+  - [Static Resources (EF Core)](#guide-static-resources-ef-core)
+  - [Dynamic Resources (Runtime Metadata)](#guide-dynamic-resources-runtime-metadata)
+  - [Admin Endpoints](#guide-admin-endpoints)
+  - [OpenAPI / Swagger](#guide-openapi--swagger)
+- [Feature Details](#auto-generated-endpoints)
+  - [Auto-generated Endpoints](#auto-generated-endpoints)
+  - [Field-level Control](#field-level-control)
+  - [Validation](#validation)
+  - [Soft Delete](#soft-delete)
+  - [Timestamps](#timestamps)
+  - [Filtering & Sorting](#filtering--sorting)
+  - [Pagination](#pagination)
+  - [Expansion](#expansion)
+  - [HEAD Support](#head-support)
+  - [Authorization](#authorization)
+  - [Row-level Security](#row-level-security)
+  - [Resource Authorization](#resource-authorization)
+  - [Field Authorization](#field-authorization)
+  - [Concurrency](#concurrency)
+  - [Hooks](#hooks)
+  - [Overrides](#overrides)
+  - [Dynamic Entities](#dynamic-entities)
+  - [Compiled Queries](#compiled-queries)
+  - [Query Caching](#query-caching)
+  - [Response Caching](#response-caching)
+  - [Bulk Operations](#bulk-operations)
+  - [Async Streaming](#async-streaming)
+  - [Audit Logging](#audit-logging)
+  - [Structured Logging](#structured-logging)
+  - [Metrics](#metrics)
+  - [Distributed Tracing](#distributed-tracing)
+  - [Health Checks](#health-checks)
+  - [Schema Endpoint](#schema-endpoint)
+- [Attributes Reference](#attributes-reference)
+- [Configuration Options](#configuration-options)
+- [Architecture](#architecture)
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| [**Auto-generated endpoints**](#auto-generated-endpoints) | `GET`, `POST`, `PATCH`, `DELETE` via Minimal APIs |
+| [**Field-level control**](#field-level-control) | Choose which fields appear in read/create/update DTOs |
+| [**Validation**](#validation) | Required fields, immutable fields, unknown field rejection |
+| [**Soft delete**](#soft-delete) | Built-in `ISoftDelete` convention support |
+| [**Timestamps**](#timestamps) | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
+| [**Filtering & Sorting**](#filtering--sorting) | Allowlisted fields with operators (`eq`, `gt`, `contains`, etc.) |
+| [**Pagination**](#pagination) | Built-in `page` + `pageSize` with configurable max |
+| [**Expansion**](#expansion) | `expand=relation` with depth limits |
+| [**HEAD support**](#head-support) | `HEAD` requests return count headers without body |
+| [**Authorization**](#authorization) | Per-operation policy names |
+| [**Row-level security**](#row-level-security) | `IResourceFilter<T>` for tenant/user-based query filtering |
+| [**Resource authorization**](#resource-authorization) | `IResourceAuthorizer<T>` for instance-level access control |
+| [**Field authorization**](#field-authorization) | `IFieldAuthorizer` for field-level read/write control |
+| [**Concurrency**](#concurrency) | Row version + `ETag` / `If-Match` headers |
+| [**Hooks**](#hooks) | Global and entity-specific lifecycle hooks |
+| [**Overrides**](#overrides) | Replace any CRUD operation with custom logic |
+| [**Dynamic entities**](#dynamic-entities) | Runtime-defined resources without recompilation |
+| [**Compiled queries**](#compiled-queries) | Pre-compiled EF Core queries for common operations |
+| [**Query caching**](#query-caching) | Optional `IDistributedCache` integration |
+| [**Response caching**](#response-caching) | ETag-based 304 responses, configurable Cache-Control |
+| [**Bulk operations**](#bulk-operations) | Batch create/update/delete via `/bulk` endpoint |
+| [**Async streaming**](#async-streaming) | `IAsyncEnumerable` support via `/stream` endpoint |
+| [**Audit logging**](#audit-logging) | `IAuditLogger` for tracking all CRUD operations |
+| [**Structured logging**](#structured-logging) | Built-in `ILogger` integration with operation timing |
+| [**Metrics**](#metrics) | OpenTelemetry-compatible counters and histograms |
+| [**Distributed tracing**](#distributed-tracing) | Activity/span integration for request tracing |
+| [**Health checks**](#health-checks) | `IHealthCheck` implementations for monitoring |
+| [**Schema endpoint**](#schema-endpoint) | `GET /api/$schema/{resource}` returns JSON Schema |
+
+## Packages
+
+| Package | Purpose | Download |
+|---------|---------|----------|
+| `DataSurface.Core` | Contracts, attributes, and builders | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Core.svg)](https://www.nuget.org/packages/DataSurface.Core) |
+| `DataSurface.EFCore` | EF Core CRUD service, hooks, query engine | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.EFCore.svg)](https://www.nuget.org/packages/DataSurface.EFCore) |
+| `DataSurface.Dynamic` | Runtime metadata storage, dynamic CRUD service | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Dynamic.svg)](https://www.nuget.org/packages/DataSurface.Dynamic) |
+| `DataSurface.Http` | Minimal API endpoint mapping, query parsing, ETags | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Http.svg)](https://www.nuget.org/packages/DataSurface.Http) |
+| `DataSurface.Admin` | Admin endpoints for managing dynamic entities | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Admin.svg)](https://www.nuget.org/packages/DataSurface.Admin) |
+| `DataSurface.OpenApi` | Swashbuckle integration for typed schemas | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.OpenApi.svg)](https://www.nuget.org/packages/DataSurface.OpenApi) |
+| `DataSurface.Generator` | *(Optional)* Source generator for typed DTOs | [![NuGet Downloads](https://img.shields.io/nuget/v/DataSurface.Generator.svg)](https://www.nuget.org/packages/DataSurface.Generator) |
+
+**Typical combinations:**
+- **Static only:** `Core` + `EFCore` + `Http`
+- **Dynamic only:** `Core` + `Dynamic` + `Http` + `Admin`
+- **Both:** All of the above
 
 ## Quick Start
 

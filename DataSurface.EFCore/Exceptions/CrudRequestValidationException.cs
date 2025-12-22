@@ -34,3 +34,32 @@ public sealed class CrudNotFoundException : Exception
     public CrudNotFoundException(string resourceKey, object id)
         : base($"'{resourceKey}' record not found for id '{id}'.") { }
 }
+
+/// <summary>
+/// Exception thrown when a concurrency conflict is detected during a CRUD operation.
+/// </summary>
+public sealed class CrudConcurrencyException : Exception
+{
+    /// <summary>
+    /// Gets the resource key.
+    /// </summary>
+    public string ResourceKey { get; }
+
+    /// <summary>
+    /// Gets the entity identifier.
+    /// </summary>
+    public object Id { get; }
+
+    /// <summary>
+    /// Creates a new instance.
+    /// </summary>
+    /// <param name="resourceKey">The resource key being accessed.</param>
+    /// <param name="id">The record identifier.</param>
+    /// <param name="message">Optional message describing the conflict.</param>
+    public CrudConcurrencyException(string resourceKey, object id, string? message = null)
+        : base(message ?? $"Concurrency conflict for '{resourceKey}' record with id '{id}'.")
+    {
+        ResourceKey = resourceKey;
+        Id = id;
+    }
+}

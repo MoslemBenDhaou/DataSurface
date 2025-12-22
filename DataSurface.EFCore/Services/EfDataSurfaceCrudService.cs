@@ -477,6 +477,29 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_security is not null)
             await _security.AuthorizeResourceAsync(c, entity, clrType, CrudOperation.Delete, ct);
 
+        // Concurrency check: verify If-Match token matches entity's current concurrency value
+        if (!string.IsNullOrWhiteSpace(deleteSpec?.ConcurrencyToken))
+        {
+            var cc = c.Operations.TryGetValue(CrudOperation.Update, out var oc) ? oc.Concurrency : null;
+            if (cc is not null && cc.Mode == ConcurrencyMode.RowVersion)
+            {
+                // Find the CLR property name from the field's ApiName
+                var field = c.Fields.FirstOrDefault(f => f.ApiName.Equals(cc.FieldApiName, StringComparison.OrdinalIgnoreCase));
+                var prop = field is not null ? clrType.GetProperty(field.Name) : null;
+                if (prop is not null)
+                {
+                    var currentValue = prop.GetValue(entity);
+                    var currentToken = currentValue switch
+                    {
+                        byte[] bytes => Convert.ToBase64String(bytes),
+                        _ => currentValue?.ToString()
+                    };
+                    if (currentToken != deleteSpec.ConcurrencyToken)
+                        throw new CrudConcurrencyException(resourceKey, id, "Entity has been modified since it was retrieved.");
+                }
+            }
+        }
+
         await InvokeTypedBeforeDelete(entity, hookCtx);
 
         var hard = deleteSpec?.HardDelete ?? false;

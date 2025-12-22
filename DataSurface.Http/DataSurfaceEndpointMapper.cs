@@ -62,7 +62,7 @@ public static class DataSurfaceEndpointMapper
             if (!used.Add(route) && opt.ThrowOnRouteCollision)
                 throw new InvalidOperationException($"Duplicate static route '{route}'.");
 
-            MapCrudForContract(group, c, opt, route, resolvePerRequest: false);
+            MapCrudForContract(group, c, opt, route);
         }
     }
 
@@ -176,7 +176,7 @@ public static class DataSurfaceEndpointMapper
 
     // ---------------------- Static handler mapping per contract ----------------------
 
-    private static void MapCrudForContract(RouteGroupBuilder group, ResourceContract c, DataSurfaceHttpOptions opt, string route, bool resolvePerRequest)
+    private static void MapCrudForContract(RouteGroupBuilder group, ResourceContract c, DataSurfaceHttpOptions opt, string route)
     {
         // LIST
         if (c.Operations[CrudOperation.List].Enabled)
@@ -329,6 +329,12 @@ public static class DataSurfaceEndpointMapper
         res.Headers["X-Page"] = result.Page.ToString();
         res.Headers["X-Page-Size"] = result.PageSize.ToString();
 
+        // Set Cache-Control header if configured
+        if (opt.CacheControlMaxAgeSeconds > 0)
+        {
+            res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
+        }
+
         return Results.Ok(result);
     }
 
@@ -345,6 +351,12 @@ public static class DataSurfaceEndpointMapper
         res.Headers["X-Total-Count"] = result.Total.ToString();
         res.Headers["X-Page"] = result.Page.ToString();
         res.Headers["X-Page-Size"] = c.Query.MaxPageSize.ToString();
+
+        // Set Cache-Control header if configured
+        if (opt.CacheControlMaxAgeSeconds > 0)
+        {
+            res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
+        }
 
         return Results.Ok();
     }
@@ -418,8 +430,16 @@ public static class DataSurfaceEndpointMapper
 
         var keyObj = ParseId(id, c);
 
-        // Optional: If-Match could be enforced here too if you want delete concurrency.
-        await crud.DeleteAsync(c.ResourceKey, keyObj, deleteSpec: null, ct);
+        // Extract If-Match token for concurrency check
+        CrudDeleteSpec? deleteSpec = null;
+        if (opt.EnableEtags)
+        {
+            var token = DataSurfaceHttpEtags.GetIfMatchToken(req);
+            if (!string.IsNullOrWhiteSpace(token))
+                deleteSpec = new CrudDeleteSpec(HardDelete: false, ConcurrencyToken: token);
+        }
+
+        await crud.DeleteAsync(c.ResourceKey, keyObj, deleteSpec, ct);
         return Results.NoContent();
     }
 

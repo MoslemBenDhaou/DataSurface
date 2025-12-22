@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json.Nodes;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
+using DataSurface.EFCore.Caching;
 using DataSurface.EFCore.Context;
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Exceptions;
@@ -29,6 +30,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly ILogger<EfDataSurfaceCrudService> _logger;
     private readonly CrudSecurityDispatcher? _security;
     private readonly DataSurfaceMetrics? _metrics;
+    private readonly IQueryResultCache? _cache;
 
     /// <summary>
     /// Creates a new CRUD service.
@@ -41,6 +43,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="hooks">Dispatcher for global and typed hooks.</param>
     /// <param name="overrides">Registry of per-resource override delegates.</param>
     /// <param name="logger">The logger instance.</param>
+    /// <param name="security">Optional security dispatcher for authorization and audit logging.</param>
+    /// <param name="metrics">Optional metrics recorder for observability.</param>
+    /// <param name="cache">Optional query result cache for read operations.</param>
     public EfDataSurfaceCrudService(
         DbContext db,
         IResourceContractProvider contracts,
@@ -51,7 +56,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         CrudOverrideRegistry overrides,
         ILogger<EfDataSurfaceCrudService> logger,
         CrudSecurityDispatcher? security = null,
-        DataSurfaceMetrics? metrics = null)
+        DataSurfaceMetrics? metrics = null,
+        IQueryResultCache? cache = null)
     {
         _db = db;
         _contracts = contracts;
@@ -63,6 +69,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _logger = logger;
         _security = security;
         _metrics = metrics;
+        _cache = cache;
     }
 
     /// <inheritdoc />
@@ -86,6 +93,23 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.List);
+
+        // Check cache only when no security features are active (to avoid serving cached data across users)
+        var useCache = _cache is not null && _security is null;
+        string? cacheKey = null;
+        if (useCache)
+        {
+            cacheKey = _cache!.GenerateListCacheKey(resourceKey, spec, expand);
+            var cached = await _cache.GetListAsync(resourceKey, cacheKey, ct);
+            if (cached is not null)
+            {
+                sw.Stop();
+                DataSurfaceTracing.RecordSuccess(activity, cached.Items.Count);
+                _metrics?.RecordOperation(resourceKey, CrudOperation.List, sw.Elapsed.TotalMilliseconds, cached.Items.Count);
+                _logger.LogDebug("List {Resource} cache hit, returned {Count}/{Total} items", resourceKey, cached.Items.Count, cached.Total);
+                return cached;
+            }
+        }
 
         var hookCtx = NewHookCtx(c, CrudOperation.List);
         var svcCtx = NewSvcCtx();
@@ -137,11 +161,17 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _logger.LogDebug("List {Resource} completed in {ElapsedMs}ms, returned {Count}/{Total} items",
             resourceKey, sw.ElapsedMilliseconds, json.Count, total);
 
-        return new PagedResult<JsonObject>(
+        var pagedResult = new PagedResult<JsonObject>(
             json,
             Math.Max(1, spec.Page),
             Math.Clamp(spec.PageSize, 1, c.Query.MaxPageSize),
             total);
+
+        // Store in cache (only when security is not active)
+        if (useCache && cacheKey is not null)
+            await _cache!.SetListAsync(resourceKey, cacheKey, pagedResult, duration: null, ct);
+
+        return pagedResult;
     }
 
     /// <inheritdoc />
@@ -164,6 +194,21 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Get);
+
+        // Check cache only when no security features are active (to avoid serving cached data across users)
+        var useCache = _cache is not null && _security is null;
+        if (useCache)
+        {
+            var cached = await _cache!.GetAsync(resourceKey, id, ct);
+            if (cached is not null)
+            {
+                sw.Stop();
+                DataSurfaceTracing.RecordSuccess(activity);
+                _metrics?.RecordOperation(resourceKey, CrudOperation.Get, sw.Elapsed.TotalMilliseconds);
+                _logger.LogDebug("Get {Resource} id={Id} cache hit", resourceKey, id);
+                return cached;
+            }
+        }
 
         var hookCtx = NewHookCtx(c, CrudOperation.Get);
         var svcCtx = NewSvcCtx();
@@ -220,6 +265,11 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _metrics?.RecordOperation(resourceKey, CrudOperation.Get, sw.Elapsed.TotalMilliseconds);
 
         _logger.LogDebug("Get {Resource} id={Id} completed in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
+
+        // Store in cache (only when security is not active)
+        if (useCache)
+            await _cache!.SetAsync(resourceKey, id, json, duration: null, ct);
+
         return json;
     }
 
@@ -286,6 +336,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         sw.Stop();
         DataSurfaceTracing.RecordSuccess(activity);
         _metrics?.RecordOperation(resourceKey, CrudOperation.Create, sw.Elapsed.TotalMilliseconds);
+
+        // Invalidate list cache (new item affects list results)
+        if (_cache is not null)
+            await _cache.InvalidateResourceAsync(resourceKey, ct);
 
         _logger.LogInformation("Created {Resource} in {ElapsedMs}ms", resourceKey, sw.ElapsedMilliseconds);
         return json;
@@ -365,6 +419,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         DataSurfaceTracing.RecordSuccess(activity);
         _metrics?.RecordOperation(resourceKey, CrudOperation.Update, sw.Elapsed.TotalMilliseconds);
 
+        // Invalidate cache (updated item and list results are stale)
+        if (_cache is not null)
+        {
+            await _cache.InvalidateAsync(resourceKey, id, ct);
+            await _cache.InvalidateResourceAsync(resourceKey, ct);
+        }
+
         _logger.LogInformation("Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
     }
@@ -436,6 +497,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             DataSurfaceTracing.RecordSuccess(activity);
             _metrics?.RecordOperation(resourceKey, CrudOperation.Delete, sw.Elapsed.TotalMilliseconds);
 
+            // Invalidate cache (deleted item and list results are stale)
+            if (_cache is not null)
+            {
+                await _cache.InvalidateAsync(resourceKey, id, ct);
+                await _cache.InvalidateResourceAsync(resourceKey, ct);
+            }
+
             _logger.LogInformation("Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
@@ -453,6 +521,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         sw.Stop();
         DataSurfaceTracing.RecordSuccess(activity);
         _metrics?.RecordOperation(resourceKey, CrudOperation.Delete, sw.Elapsed.TotalMilliseconds);
+
+        // Invalidate cache (deleted item and list results are stale)
+        if (_cache is not null)
+        {
+            await _cache.InvalidateAsync(resourceKey, id, ct);
+            await _cache.InvalidateResourceAsync(resourceKey, ct);
+        }
 
         _logger.LogInformation("Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }

@@ -21,5 +21,10 @@ public sealed record PropertyDef(
     string? Regex = null,
     bool ConcurrencyToken = false,
     ConcurrencyMode ConcurrencyMode = ConcurrencyMode.RowVersion,
-    bool ConcurrencyRequiredOnUpdate = true
+    bool ConcurrencyRequiredOnUpdate = true,
+    bool Searchable = false,
+    bool Computed = false,
+    string? ComputedExpression = null,
+    object? DefaultValue = null,
+    IReadOnlyList<string>? AllowedValues = null
 );

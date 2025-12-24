@@ -35,7 +35,7 @@ public sealed class DynamicContractBuilder
             if (p.ConcurrencyToken)
                 concurrency = new ConcurrencyContract(p.ConcurrencyMode, p.ApiName, p.ConcurrencyRequiredOnUpdate);
 
-            var v = new FieldValidationContract(p.RequiredOnCreate, p.MinLength, p.MaxLength, p.Min, p.Max, p.Regex);
+            var v = new FieldValidationContract(p.RequiredOnCreate, p.MinLength, p.MaxLength, p.Min, p.Max, p.Regex, p.AllowedValues);
 
             return new FieldContract(
                 Name: p.Name,
@@ -43,12 +43,16 @@ public sealed class DynamicContractBuilder
                 Type: p.Type,
                 Nullable: p.Nullable,
                 InRead: p.In.HasFlag(CrudDto.Read) && !p.Hidden,
-                InCreate: p.In.HasFlag(CrudDto.Create) && !p.Hidden,
-                InUpdate: p.In.HasFlag(CrudDto.Update) && !p.Hidden && !p.Immutable,
+                InCreate: p.In.HasFlag(CrudDto.Create) && !p.Hidden && !p.Computed,
+                InUpdate: p.In.HasFlag(CrudDto.Update) && !p.Hidden && !p.Immutable && !p.Computed,
                 Filterable: p.In.HasFlag(CrudDto.Filter) && !p.Hidden,
                 Sortable: p.In.HasFlag(CrudDto.Sort) && !p.Hidden,
                 Hidden: p.Hidden,
-                Immutable: p.Immutable || p.Name.Equals(def.KeyName, StringComparison.OrdinalIgnoreCase),
+                Immutable: p.Immutable || p.Computed || p.Name.Equals(def.KeyName, StringComparison.OrdinalIgnoreCase),
+                Searchable: p.Searchable && !p.Hidden,
+                Computed: p.Computed,
+                ComputedExpression: p.ComputedExpression,
+                DefaultValue: p.DefaultValue,
                 Validation: v
             );
         }).ToList();
@@ -56,12 +60,22 @@ public sealed class DynamicContractBuilder
         if (fields.All(f => !f.Name.Equals(def.KeyName, StringComparison.OrdinalIgnoreCase)))
         {
             fields.Add(new FieldContract(
-                def.KeyName, char.ToLowerInvariant(def.KeyName[0]) + def.KeyName[1..],
-                def.KeyType, false,
-                InRead: true, InCreate: false, InUpdate: false,
-                Filterable: true, Sortable: true,
-                Hidden: false, Immutable: true,
-                new FieldValidationContract(false, null, null, null, null, null)
+                Name: def.KeyName,
+                ApiName: char.ToLowerInvariant(def.KeyName[0]) + def.KeyName[1..],
+                Type: def.KeyType,
+                Nullable: false,
+                InRead: true,
+                InCreate: false,
+                InUpdate: false,
+                Filterable: true,
+                Sortable: true,
+                Hidden: false,
+                Immutable: true,
+                Searchable: false,
+                Computed: false,
+                ComputedExpression: null,
+                DefaultValue: null,
+                Validation: new FieldValidationContract(false, null, null, null, null, null)
             ));
         }
 
@@ -76,10 +90,11 @@ public sealed class DynamicContractBuilder
 
         var filterableFields = fields.Where(f => f.Filterable).Select(f => f.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var sortableFields = fields.Where(f => f.Sortable).Select(f => f.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var searchableFields = fields.Where(f => f.Searchable).Select(f => f.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var expandAllowed = relations.Where(r => r.Read.ExpandAllowed).Select(r => r.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var defaultExpand = relations.Where(r => r.Read.DefaultExpanded).Select(r => r.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-        var query = new QueryContract(def.MaxPageSize, filterableFields, sortableFields, DefaultSort: null);
+        var query = new QueryContract(def.MaxPageSize, filterableFields, sortableFields, searchableFields, DefaultSort: null);
         var read = new ReadContract(expandAllowed, def.MaxExpandDepth, defaultExpand);
 
         IReadOnlyList<string> readShape = fields.Where(f => f.InRead).Select(f => f.ApiName).ToList();

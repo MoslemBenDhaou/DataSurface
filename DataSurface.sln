@@ -20,6 +20,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DataSurface.Tests.Integrati
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DataSurface.Tests.Unit", "DataSurface.Tests.Unit\DataSurface.Tests.Unit.csproj", "{A79DE4C8-4C8B-4ECE-98AA-7ABB47474C6C}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DataSurface.Benchmarks", "DataSurface.Benchmarks\DataSurface.Benchmarks.csproj", "{001E257F-A1EB-4DDF-ADA9-BAA81663C4D8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -62,6 +64,10 @@ Global
 		{A79DE4C8-4C8B-4ECE-98AA-7ABB47474C6C}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A79DE4C8-4C8B-4ECE-98AA-7ABB47474C6C}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A79DE4C8-4C8B-4ECE-98AA-7ABB47474C6C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{001E257F-A1EB-4DDF-ADA9-BAA81663C4D8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{001E257F-A1EB-4DDF-ADA9-BAA81663C4D8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{001E257F-A1EB-4DDF-ADA9-BAA81663C4D8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{001E257F-A1EB-4DDF-ADA9-BAA81663C4D8}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

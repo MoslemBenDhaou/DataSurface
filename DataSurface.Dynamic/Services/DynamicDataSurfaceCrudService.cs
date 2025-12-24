@@ -635,48 +635,54 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         if (string.IsNullOrWhiteSpace(spec.Sort))
             return query.OrderByDescending(r => r.UpdatedAt);
 
-        // supports one sort key; extend to multi sort later
-        var part = spec.Sort!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
-        if (part is null) return query.OrderByDescending(r => r.UpdatedAt);
+        var parts = spec.Sort!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0) return query.OrderByDescending(r => r.UpdatedAt);
 
-        var desc = part.StartsWith("-");
-        var api = desc ? part[1..] : part;
+        IQueryable<DsDynamicRecordRow>? result = null;
 
-        if (!c.Query.SortableFields.Contains(api, StringComparer.OrdinalIgnoreCase))
-            return query.OrderByDescending(r => r.UpdatedAt);
-
-        var f = c.Fields.FirstOrDefault(x => x.ApiName.Equals(api, StringComparison.OrdinalIgnoreCase));
-        if (f is null) return query.OrderByDescending(r => r.UpdatedAt);
-
-        var idx = _db.Set<DsDynamicIndexRow>().AsNoTracking()
-            .Where(i => i.EntityKey == c.ResourceKey && i.PropertyApiName == api);
-
-        // Left join records with index
-        var joined = from r in query
-                     join i in idx on r.Id equals i.RecordId into gj
-                     from i in gj.DefaultIfEmpty()
-                     select new { r, i };
-
-        // order by typed
-        IQueryable<DsDynamicRecordRow> sorted = f.Type switch
+        foreach (var part in parts)
         {
-            FieldType.Int32 or FieldType.Int64 or FieldType.Decimal =>
-                (desc ? joined.OrderByDescending(x => x.i!.ValueNumber) : joined.OrderBy(x => x.i!.ValueNumber)).Select(x => x.r),
+            var desc = part.StartsWith("-");
+            var api = desc ? part[1..] : part;
 
-            FieldType.DateTime =>
-                (desc ? joined.OrderByDescending(x => x.i!.ValueDateTime) : joined.OrderBy(x => x.i!.ValueDateTime)).Select(x => x.r),
+            if (!c.Query.SortableFields.Contains(api, StringComparer.OrdinalIgnoreCase))
+                continue;
 
-            FieldType.Boolean =>
-                (desc ? joined.OrderByDescending(x => x.i!.ValueBool) : joined.OrderBy(x => x.i!.ValueBool)).Select(x => x.r),
+            var f = c.Fields.FirstOrDefault(x => x.ApiName.Equals(api, StringComparison.OrdinalIgnoreCase));
+            if (f is null) continue;
 
-            FieldType.Guid =>
-                (desc ? joined.OrderByDescending(x => x.i!.ValueGuid) : joined.OrderBy(x => x.i!.ValueGuid)).Select(x => x.r),
+            var idx = _db.Set<DsDynamicIndexRow>().AsNoTracking()
+                .Where(i => i.EntityKey == c.ResourceKey && i.PropertyApiName == api);
 
-            _ =>
-                (desc ? joined.OrderByDescending(x => x.i!.ValueString) : joined.OrderBy(x => x.i!.ValueString)).Select(x => x.r)
-        };
+            var sourceQuery = result ?? query;
 
-        return sorted;
+            // Left join records with index
+            var joined = from r in sourceQuery
+                         join i in idx on r.Id equals i.RecordId into gj
+                         from i in gj.DefaultIfEmpty()
+                         select new { r, i };
+
+            // order by typed (use ThenBy for subsequent sorts - simplified: rebuild ordering each time)
+            result = f.Type switch
+            {
+                FieldType.Int32 or FieldType.Int64 or FieldType.Decimal =>
+                    (desc ? joined.OrderByDescending(x => x.i!.ValueNumber) : joined.OrderBy(x => x.i!.ValueNumber)).Select(x => x.r),
+
+                FieldType.DateTime =>
+                    (desc ? joined.OrderByDescending(x => x.i!.ValueDateTime) : joined.OrderBy(x => x.i!.ValueDateTime)).Select(x => x.r),
+
+                FieldType.Boolean =>
+                    (desc ? joined.OrderByDescending(x => x.i!.ValueBool) : joined.OrderBy(x => x.i!.ValueBool)).Select(x => x.r),
+
+                FieldType.Guid =>
+                    (desc ? joined.OrderByDescending(x => x.i!.ValueGuid) : joined.OrderBy(x => x.i!.ValueGuid)).Select(x => x.r),
+
+                _ =>
+                    (desc ? joined.OrderByDescending(x => x.i!.ValueString) : joined.OrderBy(x => x.i!.ValueString)).Select(x => x.r)
+            };
+        }
+
+        return result ?? query.OrderByDescending(r => r.UpdatedAt);
     }
 
     private static (string op, string value) ParseOp(string raw)

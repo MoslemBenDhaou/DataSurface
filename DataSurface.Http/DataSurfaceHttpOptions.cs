@@ -81,4 +81,40 @@ public sealed class DataSurfaceHttpOptions
     /// Gets or sets whether to support If-None-Match headers for 304 responses on GET requests.
     /// </summary>
     public bool EnableConditionalGet { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets whether to enable PUT endpoints for full replacement updates (alongside PATCH).
+    /// </summary>
+    public bool EnablePutForFullUpdate { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets whether to enable import/export endpoints (POST/GET /api/{resource}/import, /export).
+    /// </summary>
+    public bool EnableImportExport { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets whether to enable rate limiting per resource/operation.
+    /// Requires ASP.NET Core rate limiting middleware to be configured.
+    /// </summary>
+    public bool EnableRateLimiting { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets the default rate limiting policy name applied to endpoints.
+    /// </summary>
+    public string? RateLimitingPolicy { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to enable API key authentication for CRUD endpoints.
+    /// </summary>
+    public bool EnableApiKeyAuth { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets the header name for API key authentication.
+    /// </summary>
+    public string ApiKeyHeaderName { get; set; } = "X-Api-Key";
+
+    /// <summary>
+    /// Gets or sets whether to enable webhook publishing for CRUD events.
+    /// </summary>
+    public bool EnableWebhooks { get; set; } = false;
 }

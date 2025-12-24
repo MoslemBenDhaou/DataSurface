@@ -590,6 +590,34 @@ public class User : ITimestamped
 ?filter[name]=starts:john   # string starts with
 ?filter[name]=ends:son      # string ends with
 ?filter[status]=in:a|b|c    # in list (pipe-separated)
+?filter[email]=isnull:true  # is null
+?filter[email]=isnull:false # is not null
+```
+
+### Full-Text Search
+
+Search across all searchable fields using the `q` parameter:
+
+```
+?q=john                     # searches all fields marked with Searchable = true
+```
+
+Mark fields as searchable:
+
+```csharp
+[CrudField(CrudDto.Read | CrudDto.Filter, Searchable = true)]
+public string Title { get; set; }
+
+[CrudField(CrudDto.Read | CrudDto.Filter, Searchable = true)]
+public string Description { get; set; }
+```
+
+### Field Projection
+
+Return only specific fields using the `fields` parameter:
+
+```
+?fields=id,title,createdAt  # only return these fields
 ```
 
 ### Sorting
@@ -1357,7 +1385,14 @@ app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
     RequireAuthorizationByDefault = false,  // Require auth on all endpoints
     DefaultPolicy = null,                   // Default auth policy
     EnableEtags = true,                     // ETag response headers
-    ThrowOnRouteCollision = false           // Fail on duplicate routes
+    ThrowOnRouteCollision = false,          // Fail on duplicate routes
+    EnablePutForFullUpdate = false,         // Enable PUT for full replacement
+    EnableImportExport = false,             // Enable import/export endpoints
+    EnableRateLimiting = false,             // Enable rate limiting
+    RateLimitingPolicy = null,              // Rate limiting policy name
+    EnableApiKeyAuth = false,               // Enable API key authentication
+    ApiKeyHeaderName = "X-Api-Key",         // API key header name
+    EnableWebhooks = false                  // Enable webhook publishing
 });
 ```
 
@@ -1444,3 +1479,129 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 - [ ] Call `app.MapDataSurfaceCrud()`
 - [ ] *(Optional)* Add `DataSurface.OpenApi` for Swagger schemas
 - [ ] *(Optional)* Add `DataSurface.Admin` for runtime entity management
+
+---
+
+## New Features (v2.0)
+
+### Default Field Values
+
+Set default values that are applied when creating resources:
+
+```csharp
+[CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = "pending")]
+public string Status { get; set; }
+
+[CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = 0)]
+public int Priority { get; set; }
+```
+
+### Computed Fields
+
+Define server-calculated read-only fields:
+
+```csharp
+[CrudField(CrudDto.Read, ComputedExpression = "FirstName + ' ' + LastName")]
+public string FullName { get; set; }
+```
+
+### Enum/Value Validation
+
+Restrict field values to an allowed list:
+
+```csharp
+[CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, AllowedValues = "Active|Inactive|Pending")]
+public string Status { get; set; }
+```
+
+### Tenant Isolation
+
+Automatic multi-tenancy with the `[CrudTenant]` attribute:
+
+```csharp
+public class Order
+{
+    [CrudTenant(ClaimType = "tenant_id", Required = true)]
+    public string TenantId { get; set; }
+}
+```
+
+### Import/Export Endpoints
+
+Enable bulk data import/export:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableImportExport = true
+});
+```
+
+**Endpoints:**
+- `GET /api/{resource}/export?format=json|csv` - Export all records
+- `POST /api/{resource}/import` - Import records from JSON array
+
+### PUT for Full Updates
+
+Enable PUT endpoints for full resource replacement:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnablePutForFullUpdate = true
+});
+```
+
+### Webhooks
+
+Publish events when CRUD operations occur:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableWebhooks = true
+});
+
+// Register webhook publisher
+builder.Services.AddSingleton<IWebhookPublisher, MyWebhookPublisher>();
+```
+
+### Rate Limiting
+
+Integrate with ASP.NET Core rate limiting:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableRateLimiting = true,
+    RateLimitingPolicy = "DataSurfacePolicy"
+});
+```
+
+### API Key Authentication
+
+Enable API key authentication for machine-to-machine access:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableApiKeyAuth = true,
+    ApiKeyHeaderName = "X-Api-Key"
+});
+```
+
+---
+
+## Planned Features
+
+The following features are planned for future releases:
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **GraphQL Endpoint** | `/api/graphql` with auto-generated schema | Planned |
+| **Cross-backend Expansion** | Expand dynamic entities from EF entities | Planned |
+| **Change Data Capture** | Track historical changes with versioning | Planned |
+| **Async Job Queue** | Background processing for long-running operations | Planned |
+| **Fluent Configuration** | `builder.Resource<T>().Field(x => x.Name)` syntax | Planned |
+| **OpenTelemetry Metrics** | Enhanced observability integration | Planned |
+| **gRPC Support** | gRPC endpoints | Planned |

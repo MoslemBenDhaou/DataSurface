@@ -85,6 +85,7 @@ public sealed record QueryContract(
     int MaxPageSize,                           // Maximum page size (default: 200)
     IReadOnlyList<string> FilterableFields,   // Fields allowed in filter[field]=value
     IReadOnlyList<string> SortableFields,     // Fields allowed in sort=field
+    IReadOnlyList<string> SearchableFields,   // Fields included in full-text search (q parameter)
     string? DefaultSort                        // Optional default sort (e.g., "-createdAt")
 );
 ```
@@ -136,6 +137,10 @@ public sealed record FieldContract(
     bool Sortable,                     // Can use sort=field
     bool Hidden,                       // Hard-hidden (never exposed)
     bool Immutable,                    // Cannot be changed after creation
+    bool Searchable,                   // Included in full-text search (q parameter)
+    bool Computed,                     // Server-calculated read-only field
+    string? ComputedExpression,        // Expression for computed fields
+    object? DefaultValue,              // Default value on create
     FieldValidationContract Validation // Validation rules
 );
 ```
@@ -147,12 +152,13 @@ Validation rules for a field.
 ```csharp
 // DataSurface.Core.Contracts.FieldValidationContract
 public sealed record FieldValidationContract(
-    bool RequiredOnCreate,   // Must be present on POST
-    int? MinLength,          // Minimum string length
-    int? MaxLength,          // Maximum string length
-    decimal? Min,            // Minimum numeric value
-    decimal? Max,            // Maximum numeric value
-    string? Regex            // Pattern constraint for strings
+    bool RequiredOnCreate,             // Must be present on POST
+    int? MinLength,                    // Minimum string length
+    int? MaxLength,                    // Maximum string length
+    decimal? Min,                      // Minimum numeric value
+    decimal? Max,                      // Maximum numeric value
+    string? Regex,                     // Pattern constraint for strings
+    IReadOnlyList<string>? AllowedValues  // Allowed values for enum/string validation
 );
 ```
 

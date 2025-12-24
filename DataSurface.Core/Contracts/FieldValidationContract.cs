@@ -9,11 +9,13 @@
 /// <param name="Min">Minimum allowed numeric value.</param>
 /// <param name="Max">Maximum allowed numeric value.</param>
 /// <param name="Regex">Optional regex pattern constraint for string values.</param>
+/// <param name="AllowedValues">Optional list of allowed values for enum/string validation.</param>
 public sealed record FieldValidationContract(
     bool RequiredOnCreate,
     int? MinLength,
     int? MaxLength,
     decimal? Min,
     decimal? Max,
-    string? Regex
+    string? Regex,
+    IReadOnlyList<string>? AllowedValues = null
 );

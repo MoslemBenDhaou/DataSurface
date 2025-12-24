@@ -57,4 +57,26 @@ public sealed class CrudFieldAttribute : Attribute
     /// Gets or sets a regular expression constraint applied to string values.
     /// </summary>
     public string? Regex { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether this field is included in full-text search (q parameter).
+    /// </summary>
+    public bool Searchable { get; set; }
+
+    /// <summary>
+    /// Gets or sets the default value for this field when creating a resource.
+    /// The value is parsed based on the field type.
+    /// </summary>
+    public object? DefaultValue { get; set; }
+
+    /// <summary>
+    /// Gets or sets a computed field expression (e.g., "FirstName + ' ' + LastName").
+    /// Computed fields are read-only and calculated server-side.
+    /// </summary>
+    public string? ComputedExpression { get; set; }
+
+    /// <summary>
+    /// Gets or sets the allowed enum values for validation (pipe-separated, e.g., "Active|Inactive|Pending").
+    /// </summary>
+    public string? AllowedValues { get; set; }
 }

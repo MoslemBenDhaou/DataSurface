@@ -143,13 +143,22 @@ public sealed class ContractBuilder
 
             var (ft, nullable) = MapFieldType(p.PropertyType);
 
+            var searchable = fa?.Searchable ?? false;
+            var computed = !string.IsNullOrWhiteSpace(fa?.ComputedExpression);
+            var computedExpr = fa?.ComputedExpression;
+            var defaultValue = fa?.DefaultValue;
+            var allowedValues = !string.IsNullOrWhiteSpace(fa?.AllowedValues)
+                ? fa!.AllowedValues.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList()
+                : null;
+
             var validation = new FieldValidationContract(
                 RequiredOnCreate: fa?.RequiredOnCreate ?? false,
                 MinLength: fa?.MinLength,
                 MaxLength: fa?.MaxLength,
                 Min: fa?.Min,
                 Max: fa?.Max,
-                Regex: fa?.Regex
+                Regex: fa?.Regex,
+                AllowedValues: allowedValues
             );
 
             fields.Add(new FieldContract(
@@ -158,12 +167,16 @@ public sealed class ContractBuilder
                 Type: ft,
                 Nullable: nullable,
                 InRead: inRead && !hardHidden,
-                InCreate: inCreate && !hardHidden,
-                InUpdate: inUpdate && !hardHidden && !immutable,
+                InCreate: inCreate && !hardHidden && !computed,
+                InUpdate: inUpdate && !hardHidden && !immutable && !computed,
                 Filterable: filterable && !hardHidden,
                 Sortable: sortable && !hardHidden,
                 Hidden: hardHidden,
-                Immutable: immutable,
+                Immutable: immutable || computed,
+                Searchable: searchable && !hardHidden,
+                Computed: computed,
+                ComputedExpression: computedExpr,
+                DefaultValue: defaultValue,
                 Validation: validation
             ));
         }
@@ -184,6 +197,10 @@ public sealed class ContractBuilder
                 Sortable: true,
                 Hidden: false,
                 Immutable: true,
+                Searchable: false,
+                Computed: false,
+                ComputedExpression: null,
+                DefaultValue: null,
                 Validation: new FieldValidationContract(false, null, null, null, null, null)
             ));
         }
@@ -194,7 +211,9 @@ public sealed class ContractBuilder
         var expandAllowed = relations.Where(r => r.Read.ExpandAllowed).Select(r => r.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var defaultExpand = relations.Where(r => r.Read.DefaultExpanded).Select(r => r.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-        var query = new QueryContract(ra.MaxPageSize, filterableFields, sortableFields, DefaultSort: null);
+        var searchableFields = fields.Where(f => f.Searchable).Select(f => f.ApiName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        var query = new QueryContract(ra.MaxPageSize, filterableFields, sortableFields, searchableFields, DefaultSort: null);
         var read = new ReadContract(expandAllowed, ra.MaxExpandDepth, defaultExpand);
 
         // Operation shapes

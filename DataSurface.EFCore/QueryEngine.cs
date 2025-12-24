@@ -44,10 +44,47 @@ public sealed class EfCrudQueryEngine
         if (spec.Filters != null && spec.Filters.Count > 0)
             query = ApplyFilters(query, contract, spec.Filters);
 
+        if (!string.IsNullOrWhiteSpace(spec.Search))
+            query = ApplySearch(query, contract, spec.Search!);
+
         if (!string.IsNullOrWhiteSpace(spec.Sort))
             query = ApplySort(query, contract, spec.Sort!);
 
         return query.Skip((page - 1) * pageSize).Take(pageSize);
+    }
+
+    private static IQueryable<TEntity> ApplySearch<TEntity>(
+        IQueryable<TEntity> query,
+        ResourceContract contract,
+        string searchTerm)
+        where TEntity : class
+    {
+        if (contract.Query.SearchableFields.Count == 0) return query;
+
+        var param = Expression.Parameter(typeof(TEntity), "e");
+        Expression? combined = null;
+
+        foreach (var apiName in contract.Query.SearchableFields)
+        {
+            var field = contract.Fields.FirstOrDefault(f => f.ApiName.Equals(apiName, StringComparison.OrdinalIgnoreCase));
+            if (field == null) continue;
+
+            var prop = Expression.Property(param, field.Name);
+            if (prop.Type != typeof(string)) continue;
+
+            var containsMethod = typeof(string).GetMethod(nameof(string.Contains), new[] { typeof(string) })!;
+            var searchConstant = Expression.Constant(searchTerm, typeof(string));
+            var nullCheck = Expression.NotEqual(prop, Expression.Constant(null, typeof(string)));
+            var containsCall = Expression.Call(prop, containsMethod, searchConstant);
+            var safeContains = Expression.AndAlso(nullCheck, containsCall);
+
+            combined = combined == null ? safeContains : Expression.OrElse(combined, safeContains);
+        }
+
+        if (combined == null) return query;
+
+        var lambda = Expression.Lambda<Func<TEntity, bool>>(combined, param);
+        return query.Where(lambda);
     }
 
     private static IQueryable<TEntity> ApplyFilters<TEntity>(
@@ -96,36 +133,64 @@ public sealed class EfCrudQueryEngine
         var prop = Expression.Property(param, clrPropName);
         var propType = prop.Type;
         var nonNull = Nullable.GetUnderlyingType(propType) ?? propType;
+        var isNullable = Nullable.GetUnderlyingType(propType) != null || !propType.IsValueType;
+
+        // Handle isnull operator
+        if (op.Equals("isnull", StringComparison.OrdinalIgnoreCase))
+        {
+            var isNull = rawValue.Equals("true", StringComparison.OrdinalIgnoreCase);
+            var nullConstant = Expression.Constant(null, propType);
+            return isNull
+                ? Expression.Equal(prop, nullConstant)
+                : Expression.NotEqual(prop, nullConstant);
+        }
+
+        // Handle 'in' operator for multiple values
+        if (op.Equals("in", StringComparison.OrdinalIgnoreCase))
+        {
+            var values = rawValue.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var typedValues = values.Select(v => nonNull == typeof(string) ? v : ConvertTo(nonNull, v)).ToList();
+            
+            Expression? inExpr = null;
+            foreach (var val in typedValues)
+            {
+                var constant = Expression.Constant(val, nonNull);
+                Expression left = isNullable && propType.IsValueType ? Expression.Convert(prop, nonNull) : prop;
+                var eq = Expression.Equal(left, constant);
+                inExpr = inExpr == null ? eq : Expression.OrElse(inExpr, eq);
+            }
+            return inExpr ?? Expression.Constant(false);
+        }
 
         object? typed = rawValue;
         if (nonNull != typeof(string))
             typed = ConvertTo(nonNull, rawValue);
 
-        var constant = Expression.Constant(typed, nonNull);
+        var valueConstant = Expression.Constant(typed, nonNull);
 
-        Expression left = prop;
-        if (Nullable.GetUnderlyingType(propType) != null)
-            left = Expression.Convert(prop, nonNull);
+        Expression leftExpr = prop;
+        if (isNullable && propType.IsValueType)
+            leftExpr = Expression.Convert(prop, nonNull);
 
         return op.ToLowerInvariant() switch
         {
-            "eq"  => Expression.Equal(left, constant),
-            "neq" => Expression.NotEqual(left, constant),
-            "gt"  => Expression.GreaterThan(left, constant),
-            "gte" => Expression.GreaterThanOrEqual(left, constant),
-            "lt"  => Expression.LessThan(left, constant),
-            "lte" => Expression.LessThanOrEqual(left, constant),
+            "eq"  => Expression.Equal(leftExpr, valueConstant),
+            "neq" => Expression.NotEqual(leftExpr, valueConstant),
+            "gt"  => Expression.GreaterThan(leftExpr, valueConstant),
+            "gte" => Expression.GreaterThanOrEqual(leftExpr, valueConstant),
+            "lt"  => Expression.LessThan(leftExpr, valueConstant),
+            "lte" => Expression.LessThanOrEqual(leftExpr, valueConstant),
 
             "contains" when nonNull == typeof(string)
-                => Expression.Call(left, nameof(string.Contains), Type.EmptyTypes, constant),
+                => Expression.Call(leftExpr, nameof(string.Contains), Type.EmptyTypes, valueConstant),
 
             "starts" when nonNull == typeof(string)
-                => Expression.Call(left, nameof(string.StartsWith), Type.EmptyTypes, constant),
+                => Expression.Call(leftExpr, nameof(string.StartsWith), Type.EmptyTypes, valueConstant),
 
             "ends" when nonNull == typeof(string)
-                => Expression.Call(left, nameof(string.EndsWith), Type.EmptyTypes, constant),
+                => Expression.Call(leftExpr, nameof(string.EndsWith), Type.EmptyTypes, valueConstant),
 
-            _ => Expression.Equal(left, constant)
+            _ => Expression.Equal(leftExpr, valueConstant)
         };
     }
 

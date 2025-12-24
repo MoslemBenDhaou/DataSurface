@@ -294,6 +294,51 @@ public static class DataSurfaceEndpointMapper
 
             ApplyAuth(ep, c, CrudOperation.List, opt);
         }
+
+        // PUT - Full replacement update (optional)
+        if (opt.EnablePutForFullUpdate && c.Operations[CrudOperation.Update].Enabled)
+        {
+            var ep = group.MapPut($"{route}/{{id}}", async (string id, JsonObject body, HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
+            {
+                try { return await HandlePut(c, id, body, req, res, sp, opt, ct); }
+                catch (Exception ex) { return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext); }
+            })
+            .WithTags(c.Route)
+            .WithName($"{c.Route}.put")
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Update));
+
+            ApplyAuth(ep, c, CrudOperation.Update, opt);
+        }
+
+        // EXPORT - GET /api/{resource}/export
+        if (opt.EnableImportExport && c.Operations[CrudOperation.List].Enabled)
+        {
+            var ep = group.MapGet($"{route}/export", async (HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
+            {
+                try { return await HandleExport(c, req, res, sp, opt, ct); }
+                catch (Exception ex) { return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext); }
+            })
+            .WithTags(c.Route)
+            .WithName($"{c.Route}.export")
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
+
+            ApplyAuth(ep, c, CrudOperation.List, opt);
+        }
+
+        // IMPORT - POST /api/{resource}/import
+        if (opt.EnableImportExport && c.Operations[CrudOperation.Create].Enabled)
+        {
+            var ep = group.MapPost($"{route}/import", async (HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
+            {
+                try { return await HandleImport(c, req, res, sp, opt, ct); }
+                catch (Exception ex) { return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext); }
+            })
+            .WithTags(c.Route)
+            .WithName($"{c.Route}.import")
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Create));
+
+            ApplyAuth(ep, c, CrudOperation.Create, opt);
+        }
     }
 
     private static void ApplyAuth(RouteHandlerBuilder ep, ResourceContract c, CrudOperation op, DataSurfaceHttpOptions opt)
@@ -473,6 +518,120 @@ public static class DataSurfaceEndpointMapper
                 await writer.FlushAsync();
             }
         }, contentType: "application/x-ndjson");
+    }
+
+    private static async Task<IResult> HandlePut(ResourceContract c, string id, JsonObject body, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
+    {
+        var crud = sp.GetRequiredService<IDataSurfaceCrudService>();
+
+        // If-Match -> concurrency token (RowVersion)
+        DataSurfaceHttpEtags.ApplyIfMatchToPatch(c, req, body, opt.EnableEtags);
+
+        var keyObj = ParseId(id, c);
+
+        // For PUT, we need to ensure all required fields are present (full replacement)
+        // The update service will handle validation
+        var updated = await crud.UpdateAsync(c.ResourceKey, keyObj, body, ct);
+
+        DataSurfaceHttpEtags.TrySetEtag(res, c, updated, opt.EnableEtags);
+        return Results.Ok(updated);
+    }
+
+    private static async Task<IResult> HandleExport(ResourceContract c, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
+    {
+        var crud = sp.GetRequiredService<IDataSurfaceCrudService>();
+
+        // Get format from query string (default: json)
+        var format = req.Query.TryGetValue("format", out var f) && f.ToString().Equals("csv", StringComparison.OrdinalIgnoreCase)
+            ? "csv"
+            : "json";
+
+        // Export all records (with pagination limits)
+        var spec = DataSurfaceQueryParser.ParseQuerySpec(req, c);
+        spec = spec with { PageSize = c.Query.MaxPageSize };
+
+        var result = await crud.ListAsync(c.ResourceKey, spec, expand: null, ct);
+
+        if (format == "csv")
+        {
+            res.Headers.ContentType = "text/csv";
+            res.Headers.ContentDisposition = $"attachment; filename=\"{c.ResourceKey}_export.csv\"";
+
+            var fields = c.Fields.Where(field => field.InRead && !field.Hidden).ToList();
+            var csv = new System.Text.StringBuilder();
+
+            // Header row
+            csv.AppendLine(string.Join(",", fields.Select(field => $"\"{field.ApiName}\"")));
+
+            // Data rows
+            foreach (var item in result.Items)
+            {
+                var values = fields.Select(field =>
+                {
+                    if (item.TryGetPropertyValue(field.ApiName, out var val) && val != null)
+                    {
+                        var str = val.ToString().Replace("\"", "\"\"");
+                        return $"\"{str}\"";
+                    }
+                    return "\"\"";
+                });
+                csv.AppendLine(string.Join(",", values));
+            }
+
+            return Results.Text(csv.ToString(), "text/csv");
+        }
+
+        res.Headers.ContentType = "application/json";
+        res.Headers.ContentDisposition = $"attachment; filename=\"{c.ResourceKey}_export.json\"";
+        return Results.Ok(result.Items);
+    }
+
+    private static async Task<IResult> HandleImport(ResourceContract c, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
+    {
+        var crud = sp.GetRequiredService<IDataSurfaceCrudService>();
+
+        // Read request body as JSON array
+        using var reader = new System.IO.StreamReader(req.Body);
+        var bodyText = await reader.ReadToEndAsync(ct);
+
+        var items = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.Nodes.JsonArray>(bodyText);
+        if (items == null || items.Count == 0)
+            return Results.BadRequest(new { error = "Request body must be a non-empty JSON array." });
+
+        var successCount = 0;
+        var failureCount = 0;
+        var errors = new List<object>();
+
+        var rowNum = 0;
+        foreach (var item in items)
+        {
+            rowNum++;
+            if (item is not JsonObject obj)
+            {
+                failureCount++;
+                errors.Add(new { row = rowNum, error = "Item is not a valid JSON object." });
+                continue;
+            }
+
+            try
+            {
+                await crud.CreateAsync(c.ResourceKey, obj, ct);
+                successCount++;
+            }
+            catch (Exception ex)
+            {
+                failureCount++;
+                errors.Add(new { row = rowNum, error = ex.Message });
+            }
+        }
+
+        return Results.Ok(new
+        {
+            total = items.Count,
+            success = successCount,
+            failures = failureCount,
+            errors
+        });
     }
 
     // ---------------------- helpers ----------------------

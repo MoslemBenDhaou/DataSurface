@@ -39,7 +39,13 @@ public static class DataSurfaceQueryParser
                 filters[field] = value;
         }
 
-        return new QuerySpec(Page: page, PageSize: pageSize, Sort: sort, Filters: filters);
+        // Full-text search (q parameter)
+        string? search = req.Query.TryGetValue("q", out var q) ? q.ToString() : null;
+
+        // Field projection (fields parameter)
+        string? fields = req.Query.TryGetValue("fields", out var f) ? f.ToString() : null;
+
+        return new QuerySpec(Page: page, PageSize: pageSize, Sort: sort, Filters: filters, Search: search, Fields: fields);
     }
 
     /// <summary>

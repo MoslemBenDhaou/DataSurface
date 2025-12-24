@@ -16,6 +16,10 @@ namespace DataSurface.Core.Contracts;
 /// <param name="Sortable">Whether the field may be used for sorting.</param>
 /// <param name="Hidden">Whether the field is hard-hidden (never accepted/emitted).</param>
 /// <param name="Immutable">Whether the field is immutable (cannot be changed on update).</param>
+/// <param name="Searchable">Whether the field is included in full-text search.</param>
+/// <param name="Computed">Whether the field is computed (read-only, server-calculated).</param>
+/// <param name="ComputedExpression">Expression for computed fields (e.g., "FirstName + ' ' + LastName").</param>
+/// <param name="DefaultValue">Default value applied on create when not provided.</param>
 /// <param name="Validation">Validation rules for the field.</param>
 public sealed record FieldContract(
     string Name,
@@ -29,5 +33,9 @@ public sealed record FieldContract(
     bool Sortable,
     bool Hidden,
     bool Immutable,
+    bool Searchable,
+    bool Computed,
+    string? ComputedExpression,
+    object? DefaultValue,
     FieldValidationContract Validation
 );

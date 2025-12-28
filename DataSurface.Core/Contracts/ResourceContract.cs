@@ -19,6 +19,7 @@ namespace DataSurface.Core.Contracts;
 /// <param name="Relations">All known relations.</param>
 /// <param name="Operations">Per-operation contract data.</param>
 /// <param name="Security">Per-operation policy configuration.</param>
+/// <param name="Tenant">Tenant contract.</param>
 public sealed record ResourceContract(
     string ResourceKey,
     string Route,
@@ -29,5 +30,6 @@ public sealed record ResourceContract(
     IReadOnlyList<FieldContract> Fields,
     IReadOnlyList<RelationContract> Relations,
     IReadOnlyDictionary<CrudOperation, OperationContract> Operations,
-    SecurityContract Security
+    SecurityContract Security,
+    TenantContract? Tenant = null
 );

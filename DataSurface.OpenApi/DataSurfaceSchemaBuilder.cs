@@ -53,7 +53,7 @@ public static class DataSurfaceSchemaBuilder
 
         foreach (var f in c.Fields.Where(pick))
         {
-            props[f.ApiName] = FieldSchema(f.Type, f.Nullable);
+            props[f.ApiName] = FieldSchema(f);
         }
 
         return new OpenApiSchema
@@ -64,9 +64,9 @@ public static class DataSurfaceSchemaBuilder
         };
     }
 
-    private static OpenApiSchema FieldSchema(FieldType t, bool nullable)
+    private static OpenApiSchema FieldSchema(FieldContract f)
     {
-        var s = t switch
+        var s = f.Type switch
         {
             FieldType.Int32 => new OpenApiSchema { Type = "integer", Format = "int32" },
             FieldType.Int64 => new OpenApiSchema { Type = "integer", Format = "int64" },
@@ -83,7 +83,39 @@ public static class DataSurfaceSchemaBuilder
             _ => new OpenApiSchema { Type = "string" }
         };
 
-        s.Nullable = nullable;
+        s.Nullable = f.Nullable;
+
+        // Apply validation constraints from FieldValidationContract
+        var v = f.Validation;
+
+        // String constraints
+        if (f.Type == FieldType.String)
+        {
+            if (v.MinLength.HasValue)
+                s.MinLength = v.MinLength.Value;
+            if (v.MaxLength.HasValue)
+                s.MaxLength = v.MaxLength.Value;
+            if (!string.IsNullOrEmpty(v.Regex))
+                s.Pattern = v.Regex;
+        }
+
+        // Numeric constraints
+        if (f.Type is FieldType.Int32 or FieldType.Int64 or FieldType.Decimal)
+        {
+            if (v.Min.HasValue)
+                s.Minimum = v.Min.Value;
+            if (v.Max.HasValue)
+                s.Maximum = v.Max.Value;
+        }
+
+        // AllowedValues as enum
+        if (v.AllowedValues is { Count: > 0 })
+        {
+            s.Enum = v.AllowedValues
+                .Select(val => (Microsoft.OpenApi.Any.IOpenApiAny)new Microsoft.OpenApi.Any.OpenApiString(val))
+                .ToList();
+        }
+
         return s;
     }
 }

@@ -157,7 +157,10 @@ it **handles the 80% so you can focus on the 20%**.
 - [Feature Details](#auto-generated-endpoints)
   - [Auto-generated Endpoints](#auto-generated-endpoints)
   - [Field-level Control](#field-level-control)
+  - [Default Values](#default-values)
+  - [Computed Fields](#computed-fields)
   - [Validation](#validation)
+  - [Field Projection](#field-projection)
   - [Soft Delete](#soft-delete)
   - [Timestamps](#timestamps)
   - [Filtering & Sorting](#filtering--sorting)
@@ -168,6 +171,7 @@ it **handles the 80% so you can focus on the 20%**.
   - [Row-level Security](#row-level-security)
   - [Resource Authorization](#resource-authorization)
   - [Field Authorization](#field-authorization)
+  - [Tenant Isolation](#tenant-isolation)
   - [Concurrency](#concurrency)
   - [Hooks](#hooks)
   - [Overrides](#overrides)
@@ -176,7 +180,11 @@ it **handles the 80% so you can focus on the 20%**.
   - [Query Caching](#query-caching)
   - [Response Caching](#response-caching)
   - [Bulk Operations](#bulk-operations)
+  - [Import/Export](#importexport)
   - [Async Streaming](#async-streaming)
+  - [Webhooks](#webhooks)
+  - [Rate Limiting](#rate-limiting)
+  - [API Key Authentication](#api-key-authentication)
   - [Audit Logging](#audit-logging)
   - [Structured Logging](#structured-logging)
   - [Metrics](#metrics)
@@ -185,15 +193,25 @@ it **handles the 80% so you can focus on the 20%**.
   - [Schema Endpoint](#schema-endpoint)
 - [Attributes Reference](#attributes-reference)
 - [Configuration Options](#configuration-options)
+  - [DataSurfaceEfCoreOptions](#datasurfaceefcoreoptions)
+  - [DataSurfaceHttpOptions](#datasurfacehttpoptions)
+  - [DataSurfaceDynamicOptions](#datasurfacedynamicoptions)
+  - [DataSurfaceAdminOptions](#datasurfaceadminoptions)
+  - [Feature Flags](#feature-flags)
 - [Architecture](#architecture)
+- [Quick Checklist](#quick-checklist)
+- [Planned Features](#planned-features)
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| [**Auto-generated endpoints**](#auto-generated-endpoints) | `GET`, `POST`, `PATCH`, `DELETE` via Minimal APIs |
+| [**Auto-generated endpoints**](#auto-generated-endpoints) | `GET`, `POST`, `PATCH`, `DELETE`, `PUT` via Minimal APIs |
 | [**Field-level control**](#field-level-control) | Choose which fields appear in read/create/update DTOs |
-| [**Validation**](#validation) | Required fields, immutable fields, unknown field rejection |
+| [**Default values**](#default-values) | Automatically apply defaults when creating resources |
+| [**Computed fields**](#computed-fields) | Server-calculated read-only fields |
+| [**Validation**](#validation) | Required, immutable, length, range, regex, allowed values |
+| [**Field projection**](#field-projection) | Select specific fields via `?fields=` query parameter |
 | [**Soft delete**](#soft-delete) | Built-in `ISoftDelete` convention support |
 | [**Timestamps**](#timestamps) | Auto-populate `CreatedAt`/`UpdatedAt` via `ITimestamped` |
 | [**Filtering & Sorting**](#filtering--sorting) | Allowlisted fields with operators (`eq`, `gt`, `contains`, etc.) |
@@ -204,6 +222,7 @@ it **handles the 80% so you can focus on the 20%**.
 | [**Row-level security**](#row-level-security) | `IResourceFilter<T>` for tenant/user-based query filtering |
 | [**Resource authorization**](#resource-authorization) | `IResourceAuthorizer<T>` for instance-level access control |
 | [**Field authorization**](#field-authorization) | `IFieldAuthorizer` for field-level read/write control |
+| [**Tenant isolation**](#tenant-isolation) | Automatic multi-tenancy with `[CrudTenant]` attribute |
 | [**Concurrency**](#concurrency) | Row version + `ETag` / `If-Match` headers |
 | [**Hooks**](#hooks) | Global and entity-specific lifecycle hooks |
 | [**Overrides**](#overrides) | Replace any CRUD operation with custom logic |
@@ -212,13 +231,18 @@ it **handles the 80% so you can focus on the 20%**.
 | [**Query caching**](#query-caching) | Optional `IDistributedCache` integration |
 | [**Response caching**](#response-caching) | ETag-based 304 responses, configurable Cache-Control |
 | [**Bulk operations**](#bulk-operations) | Batch create/update/delete via `/bulk` endpoint |
+| [**Import/Export**](#importexport) | Bulk data import/export in JSON or CSV format |
 | [**Async streaming**](#async-streaming) | `IAsyncEnumerable` support via `/stream` endpoint |
+| [**Webhooks**](#webhooks) | Publish events when CRUD operations occur |
+| [**Rate limiting**](#rate-limiting) | ASP.NET Core rate limiting integration |
+| [**API key authentication**](#api-key-authentication) | Machine-to-machine authentication |
 | [**Audit logging**](#audit-logging) | `IAuditLogger` for tracking all CRUD operations |
 | [**Structured logging**](#structured-logging) | Built-in `ILogger` integration with operation timing |
 | [**Metrics**](#metrics) | OpenTelemetry-compatible counters and histograms |
 | [**Distributed tracing**](#distributed-tracing) | Activity/span integration for request tracing |
 | [**Health checks**](#health-checks) | `IHealthCheck` implementations for monitoring |
 | [**Schema endpoint**](#schema-endpoint) | `GET /api/$schema/{resource}` returns JSON Schema |
+| [**Feature flags**](#feature-flags) | Selectively enable/disable features with presets |
 
 ## Packages
 
@@ -492,13 +516,28 @@ This adds:
 
 DataSurface generates fully-featured REST endpoints via Minimal APIs:
 
-- `GET /api/{resource}` — List with filtering, sorting, pagination
-- `HEAD /api/{resource}` — Get count only (in `X-Total-Count` header)
-- `GET /api/{resource}/{id}` — Get single resource
-- `POST /api/{resource}` — Create
-- `PATCH /api/{resource}/{id}` — Update
-- `DELETE /api/{resource}/{id}` — Delete
-- `GET /api/$schema/{resource}` — Get JSON Schema for resource
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/{resource}` | List with filtering, sorting, pagination |
+| `HEAD` | `/api/{resource}` | Get count only (in `X-Total-Count` header) |
+| `GET` | `/api/{resource}/{id}` | Get single resource |
+| `POST` | `/api/{resource}` | Create new resource |
+| `PATCH` | `/api/{resource}/{id}` | Partial update (only provided fields) |
+| `PUT` | `/api/{resource}/{id}` | Full replacement (all fields required) |
+| `DELETE` | `/api/{resource}/{id}` | Delete resource |
+| `GET` | `/api/$schema/{resource}` | Get JSON Schema for resource |
+
+**PUT vs PATCH:**
+- **PATCH** — Partial update: only fields in the request body are modified
+- **PUT** — Full replacement: all updatable fields must be provided (returns 400 if any are missing)
+
+To enable PUT endpoints:
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnablePutForFullUpdate = true
+});
+```
 
 See [Quick Start](#quick-start) for setup instructions.
 
@@ -508,22 +547,183 @@ See [Quick Start](#quick-start) for setup instructions.
 
 Control which fields appear in read/create/update DTOs using the `[CrudField]` attribute with `CrudDto` flags.
 
+```csharp
+[CrudResource("products")]
+public class Product
+{
+    [CrudKey]
+    public int Id { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, RequiredOnCreate = true)]
+    public string Name { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create)]  // Can set on create, but not update
+    public string SKU { get; set; } = default!;
+
+    [CrudField(CrudDto.Read)]  // Read-only, never in request bodies
+    public DateTime CreatedAt { get; set; }
+
+    // No attribute = not exposed via API
+    internal string InternalNotes { get; set; } = default!;
+}
+```
+
 See [`[CrudField]`](#crudfield) in Attributes Reference for full details.
+
+---
+
+## Default Values
+
+Automatically apply default values when creating resources. Defaults are applied server-side when a field is not provided in the request body:
+
+```csharp
+[CrudResource("orders")]
+public class Order
+{
+    [CrudKey]
+    public int Id { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = "pending")]
+    public string Status { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = 0)]
+    public int Priority { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = false)]
+    public bool IsUrgent { get; set; }
+}
+```
+
+**Behavior:**
+- Defaults are only applied on **create** operations (POST)
+- If a field is provided in the request, the provided value is used
+- If a field is omitted, the `DefaultValue` is applied
+- Works with strings, numbers, booleans, and other primitive types
+
+---
+
+## Computed Fields
+
+Define server-calculated read-only fields that are evaluated at read time. Computed fields are never stored in the database—they're calculated dynamically based on other field values:
+
+```csharp
+[CrudResource("employees")]
+public class Employee
+{
+    [CrudKey]
+    public int Id { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update)]
+    public string FirstName { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update)]
+    public string LastName { get; set; } = default!;
+
+    [CrudField(CrudDto.Read, ComputedExpression = "FirstName + ' ' + LastName")]
+    public string FullName { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create)]
+    public decimal Salary { get; set; }
+
+    [CrudField(CrudDto.Read | CrudDto.Create)]
+    public decimal Bonus { get; set; }
+
+    [CrudField(CrudDto.Read, ComputedExpression = "Salary + Bonus")]
+    public decimal TotalCompensation { get; set; }
+}
+```
+
+**Supported Expressions:**
+- String concatenation: `"FirstName + ' ' + LastName"`
+- Numeric operations: `"Salary + Bonus"`, `"Price * Quantity"`
+- Property references: Direct property names like `"PropertyName"`
+
+**Notes:**
+- Computed fields are **read-only**—they cannot be set via POST or PATCH
+- Values are calculated fresh on every read operation
+- The expression references CLR property names (not API names)
 
 ---
 
 ## Validation
 
-DataSurface provides built-in validation via `[CrudField]` attributes:
-- `RequiredOnCreate` — Field must be present on POST
-- `Immutable` — Field rejected on PATCH
-- `MinLength` / `MaxLength` — String length validation
-- `Min` / `Max` — Numeric range validation
-- `Regex` — Pattern validation
+DataSurface provides comprehensive built-in validation via `[CrudField]` attributes:
 
-Unknown fields in request bodies are automatically rejected.
+```csharp
+[CrudResource("users")]
+public class User
+{
+    [CrudKey]
+    public int Id { get; set; }
 
-See [`[CrudField]`](#crudfield) in Attributes Reference for full details.
+    // Required on create
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, RequiredOnCreate = true)]
+    public string Email { get; set; } = default!;
+
+    // Immutable after creation
+    [CrudField(CrudDto.Read | CrudDto.Create, Immutable = true)]
+    public string Username { get; set; } = default!;
+
+    // String length validation
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, MinLength = 8, MaxLength = 100)]
+    public string Password { get; set; } = default!;
+
+    // Numeric range validation
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, Min = 0, Max = 150)]
+    public int Age { get; set; }
+
+    // Regex pattern validation
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, Regex = @"^\+?[1-9]\d{1,14}$")]
+    public string? PhoneNumber { get; set; }
+
+    // Allowed values (enum-like validation)
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, AllowedValues = "Active|Inactive|Pending")]
+    public string Status { get; set; } = default!;
+}
+```
+
+**Validation Rules:**
+
+| Rule | Description |
+|------|-------------|
+| `RequiredOnCreate` | Field must be present on POST requests |
+| `Immutable` | Field rejected on PATCH requests (can only be set on create) |
+| `MinLength` | Minimum string length |
+| `MaxLength` | Maximum string length |
+| `Min` | Minimum numeric value |
+| `Max` | Maximum numeric value |
+| `Regex` | Regular expression pattern the value must match |
+| `AllowedValues` | Pipe-separated list of valid values |
+
+**Additional Behavior:**
+- Unknown fields in request bodies are automatically rejected
+- Validation errors return HTTP 400 with detailed problem details
+
+---
+
+## Field Projection
+
+Select specific fields to return using the `?fields=` query parameter. This reduces payload size and improves performance:
+
+```http
+GET /api/users?fields=id,email,name
+```
+
+**Response:**
+```json
+{
+  "items": [
+    { "id": 1, "email": "john@example.com", "name": "John" },
+    { "id": 2, "email": "jane@example.com", "name": "Jane" }
+  ]
+}
+```
+
+**Usage:**
+- Comma-separated list of field API names
+- Only requested fields are included in the response
+- Invalid field names are ignored
+- Works with list (`GET /api/resource`) and single (`GET /api/resource/{id}`) endpoints
 
 ---
 
@@ -849,6 +1049,64 @@ builder.Services.AddScoped<IFieldAuthorizer, SensitiveFieldAuthorizer>();
 
 ---
 
+## Tenant Isolation
+
+Implement automatic multi-tenancy with the `[CrudTenant]` attribute. Tenant isolation ensures users can only access data belonging to their tenant:
+
+```csharp
+[CrudResource("orders")]
+public class Order
+{
+    [CrudKey]
+    public int Id { get; set; }
+
+    [CrudTenant(ClaimType = "tenant_id", Required = true)]
+    public string TenantId { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update)]
+    public string ProductName { get; set; } = default!;
+
+    [CrudField(CrudDto.Read | CrudDto.Create)]
+    public decimal Amount { get; set; }
+}
+```
+
+**Behavior:**
+- **On queries:** Automatically filters results to only include records matching the user's tenant claim
+- **On create:** Automatically sets the tenant field to the user's tenant claim value
+- **On update/delete:** Validates the resource belongs to the user's tenant
+
+**Configuration Options:**
+
+| Option | Description |
+|--------|-------------|
+| `ClaimType` | The claim type to extract tenant ID from (e.g., `"tenant_id"`, `"org_id"`) |
+| `Required` | If `true`, requests without the tenant claim are rejected with 401 |
+
+**Custom Tenant Resolution:**
+
+For advanced scenarios, implement `ITenantResolver`:
+
+```csharp
+public class CustomTenantResolver : ITenantResolver
+{
+    private readonly IHttpContextAccessor _http;
+    
+    public CustomTenantResolver(IHttpContextAccessor http) => _http = http;
+    
+    public string? ResolveTenantId(TenantContract tenant)
+    {
+        // Custom logic: header, subdomain, database lookup, etc.
+        return _http.HttpContext?.Request.Headers["X-Tenant-Id"].FirstOrDefault();
+    }
+}
+
+// Register
+builder.Services.AddScoped<ITenantResolver, CustomTenantResolver>();
+```
+
+---
+
 ## Concurrency
 
 Row version fields enable optimistic concurrency via ETag headers.
@@ -1063,6 +1321,187 @@ Response format (newline-delimited JSON):
 {"id":2,"name":"User 2"}
 {"id":3,"name":"User 3"}
 ```
+
+---
+
+## Import/Export
+
+Bulk data import and export via dedicated endpoints:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableImportExport = true
+});
+```
+
+**Export Endpoint:**
+```http
+GET /api/users/export?format=json
+GET /api/users/export?format=csv
+```
+
+- Exports all records (respecting query filters and security)
+- Supports JSON and CSV formats
+- CSV format includes headers matching API field names
+
+**Import Endpoint:**
+```http
+POST /api/users/import
+Content-Type: application/json
+
+[
+  { "email": "user1@example.com", "name": "User 1" },
+  { "email": "user2@example.com", "name": "User 2" }
+]
+```
+
+- Imports an array of records
+- Each record is validated against the resource contract
+- Returns summary of imported, failed, and skipped records
+
+---
+
+## Webhooks
+
+Publish events when CRUD operations occur. Useful for integrations, audit trails, and event-driven architectures:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableWebhooks = true
+});
+```
+
+Implement and register a webhook publisher:
+
+```csharp
+using DataSurface.Core.Webhooks;
+
+public class MyWebhookPublisher : IWebhookPublisher
+{
+    private readonly HttpClient _http;
+    private readonly ILogger<MyWebhookPublisher> _logger;
+    
+    public MyWebhookPublisher(HttpClient http, ILogger<MyWebhookPublisher> logger)
+    {
+        _http = http;
+        _logger = logger;
+    }
+    
+    public async Task PublishAsync(WebhookEvent evt, CancellationToken ct)
+    {
+        _logger.LogInformation("Webhook: {Operation} on {Resource} id={Id}", 
+            evt.Operation, evt.ResourceKey, evt.EntityId);
+        
+        // Send to external endpoint
+        await _http.PostAsJsonAsync("https://hooks.example.com/datasurface", evt, ct);
+    }
+}
+
+// Register
+builder.Services.AddSingleton<IWebhookPublisher, MyWebhookPublisher>();
+```
+
+**`WebhookEvent` properties:**
+- `Operation` — Create, Update, or Delete
+- `ResourceKey` — The resource that changed
+- `EntityId` — ID of the affected entity
+- `Timestamp` — UTC timestamp
+- `Payload` — JSON representation of the entity (for create/update)
+
+**Failure Handling:**
+- Webhook publishing is fire-and-forget by default
+- Failures are logged but don't fail the CRUD operation
+- Implement retry logic in your `IWebhookPublisher` if needed
+
+---
+
+## Rate Limiting
+
+Integrate with ASP.NET Core rate limiting to protect your API:
+
+```csharp
+// Configure rate limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("DataSurfacePolicy", opt =>
+    {
+        opt.PermitLimit = 100;
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.QueueLimit = 10;
+    });
+});
+
+// Enable rate limiting on DataSurface endpoints
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableRateLimiting = true,
+    RateLimitingPolicy = "DataSurfacePolicy"
+});
+
+// Don't forget to use the rate limiter middleware
+app.UseRateLimiter();
+```
+
+**Per-Resource Policies:**
+
+Configure different policies per resource using `[CrudAuthorize]`:
+
+```csharp
+[CrudResource("high-traffic")]
+[CrudAuthorize(RateLimitingPolicy = "HighTrafficPolicy")]
+public class HighTrafficResource { /* ... */ }
+```
+
+---
+
+## API Key Authentication
+
+Enable API key authentication for machine-to-machine access:
+
+```csharp
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableApiKeyAuth = true,
+    ApiKeyHeaderName = "X-Api-Key"  // Default header name
+});
+```
+
+**Request:**
+```http
+GET /api/users
+X-Api-Key: your-api-key-here
+```
+
+**Custom Validation:**
+
+Implement `IApiKeyValidator` for custom validation logic:
+
+```csharp
+using DataSurface.Http;
+
+public class DatabaseApiKeyValidator : IApiKeyValidator
+{
+    private readonly AppDbContext _db;
+    
+    public DatabaseApiKeyValidator(AppDbContext db) => _db = db;
+    
+    public async Task<bool> ValidateAsync(string apiKey, CancellationToken ct)
+    {
+        return await _db.ApiKeys
+            .AnyAsync(k => k.Key == apiKey && k.IsActive && k.ExpiresAt > DateTime.UtcNow, ct);
+    }
+}
+
+// Register
+builder.Services.AddScoped<IApiKeyValidator, DatabaseApiKeyValidator>();
+```
+
+**Default Behavior:**
+- Without `IApiKeyValidator`, any non-empty API key is accepted
+- With `IApiKeyValidator`, the validator determines validity
+- Missing or invalid API keys return HTTP 401 Unauthorized
 
 ---
 
@@ -1417,6 +1856,68 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 });
 ```
 
+### Feature Flags
+
+Selectively enable or disable DataSurface features using `DataSurfaceFeatures`. This allows you to use only the features you need, reducing complexity and overhead:
+
+```csharp
+builder.Services.AddDataSurfaceEfCore(opt =>
+{
+    // Use a preset
+    opt.Features = DataSurfaceFeatures.Minimal;   // Core CRUD only
+    opt.Features = DataSurfaceFeatures.Standard;  // Default - security & observability
+    opt.Features = DataSurfaceFeatures.Full;      // All features including webhooks
+    
+    // Or customize individual features
+    opt.Features = new DataSurfaceFeatures
+    {
+        EnableFieldValidation = true,
+        EnableDefaultValues = true,
+        EnableComputedFields = true,
+        EnableFieldProjection = true,
+        EnableTenantIsolation = true,
+        EnableRowLevelSecurity = true,
+        EnableResourceAuthorization = true,
+        EnableFieldAuthorization = true,
+        EnableAuditLogging = true,
+        EnableMetrics = false,          // Disable metrics
+        EnableTracing = false,          // Disable tracing
+        EnableQueryCaching = true,
+        EnableHooks = true,
+        EnableOverrides = true,
+        EnableWebhooks = false          // Disable webhooks
+    };
+});
+```
+
+**Available Feature Flags:**
+
+| Category | Feature | Default | Description |
+|----------|---------|---------|-------------|
+| **Core CRUD** | `EnableFieldValidation` | ✅ | MinLength, MaxLength, Min, Max, Regex, AllowedValues |
+| | `EnableDefaultValues` | ✅ | Apply default values on create |
+| | `EnableComputedFields` | ✅ | Evaluate computed expressions at read time |
+| | `EnableFieldProjection` | ✅ | Support `?fields=` query parameter |
+| **Security** | `EnableTenantIsolation` | ✅ | `[CrudTenant]` attribute support |
+| | `EnableRowLevelSecurity` | ✅ | `IResourceFilter<T>` support |
+| | `EnableResourceAuthorization` | ✅ | `IResourceAuthorizer<T>` support |
+| | `EnableFieldAuthorization` | ✅ | `IFieldAuthorizer` support |
+| **Observability** | `EnableAuditLogging` | ✅ | `IAuditLogger` integration |
+| | `EnableMetrics` | ✅ | OpenTelemetry metrics |
+| | `EnableTracing` | ✅ | Distributed tracing |
+| **Caching** | `EnableQueryCaching` | ✅ | `IQueryResultCache` integration |
+| **Extensibility** | `EnableHooks` | ✅ | Lifecycle hooks |
+| | `EnableOverrides` | ✅ | CRUD operation overrides |
+| **Integration** | `EnableWebhooks` | ❌ | Webhook publishing (opt-in) |
+
+**Presets:**
+
+| Preset | Description | Use Case |
+|--------|-------------|----------|
+| `Minimal` | Core CRUD + validation only | Simple APIs, microservices, maximum performance |
+| `Standard` | Core + security + observability | Most production applications (default) |
+| `Full` | All features enabled | Feature-rich applications with webhooks |
+
 ## Architecture
 
 ```
@@ -1471,137 +1972,65 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 
 ## Quick Checklist
 
+### Required Setup
+
 - [ ] Add package references (`DataSurface.Core`, `DataSurface.EFCore`, `DataSurface.Http`)
 - [ ] Annotate entities with `[CrudResource]`, `[CrudKey]`, `[CrudField]`
 - [ ] Call `AddDataSurfaceEfCore()` with assemblies to scan
 - [ ] Register `CrudHookDispatcher`, `CrudOverrideRegistry`, `EfDataSurfaceCrudService`
 - [ ] Register `IDataSurfaceCrudService`
 - [ ] Call `app.MapDataSurfaceCrud()`
-- [ ] *(Optional)* Add `DataSurface.OpenApi` for Swagger schemas
-- [ ] *(Optional)* Add `DataSurface.Admin` for runtime entity management
 
----
+### Optional Features
 
-## New Features (v2.0)
-
-### Default Field Values
-
-Set default values that are applied when creating resources:
-
-```csharp
-[CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = "pending")]
-public string Status { get; set; }
-
-[CrudField(CrudDto.Read | CrudDto.Create, DefaultValue = 0)]
-public int Priority { get; set; }
-```
-
-### Computed Fields
-
-Define server-calculated read-only fields:
-
-```csharp
-[CrudField(CrudDto.Read, ComputedExpression = "FirstName + ' ' + LastName")]
-public string FullName { get; set; }
-```
-
-### Enum/Value Validation
-
-Restrict field values to an allowed list:
-
-```csharp
-[CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update, AllowedValues = "Active|Inactive|Pending")]
-public string Status { get; set; }
-```
-
-### Tenant Isolation
-
-Automatic multi-tenancy with the `[CrudTenant]` attribute:
-
-```csharp
-public class Order
-{
-    [CrudTenant(ClaimType = "tenant_id", Required = true)]
-    public string TenantId { get; set; }
-}
-```
-
-### Import/Export Endpoints
-
-Enable bulk data import/export:
-
-```csharp
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnableImportExport = true
-});
-```
-
-**Endpoints:**
-- `GET /api/{resource}/export?format=json|csv` - Export all records
-- `POST /api/{resource}/import` - Import records from JSON array
-
-### PUT for Full Updates
-
-Enable PUT endpoints for full resource replacement:
-
-```csharp
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnablePutForFullUpdate = true
-});
-```
-
-### Webhooks
-
-Publish events when CRUD operations occur:
-
-```csharp
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnableWebhooks = true
-});
-
-// Register webhook publisher
-builder.Services.AddSingleton<IWebhookPublisher, MyWebhookPublisher>();
-```
-
-### Rate Limiting
-
-Integrate with ASP.NET Core rate limiting:
-
-```csharp
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnableRateLimiting = true,
-    RateLimitingPolicy = "DataSurfacePolicy"
-});
-```
-
-### API Key Authentication
-
-Enable API key authentication for machine-to-machine access:
-
-```csharp
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnableApiKeyAuth = true,
-    ApiKeyHeaderName = "X-Api-Key"
-});
-```
+- [ ] Add `DataSurface.OpenApi` for Swagger schemas
+- [ ] Add `DataSurface.Admin` for runtime entity management
+- [ ] Configure `DataSurfaceFeatures` for selective feature enablement
+- [ ] Register `IWebhookPublisher` for webhook integration
+- [ ] Register `IAuditLogger` for audit logging
+- [ ] Register `IApiKeyValidator` for custom API key validation
+- [ ] Register `ITenantResolver` for custom tenant resolution
+- [ ] Register `IResourceFilter<T>` for row-level security
+- [ ] Register `IResourceAuthorizer<T>` for resource authorization
+- [ ] Register `IFieldAuthorizer` for field-level authorization
 
 ---
 
 ## Planned Features
 
-The following features are planned for future releases:
+The following features are planned for future releases. Contributions are welcome!
+
+### High Priority
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| **GraphQL Endpoint** | `/api/graphql` with auto-generated schema | Planned |
-| **Cross-backend Expansion** | Expand dynamic entities from EF entities | Planned |
-| **Change Data Capture** | Track historical changes with versioning | Planned |
-| **Async Job Queue** | Background processing for long-running operations | Planned |
-| **Fluent Configuration** | `builder.Resource<T>().Field(x => x.Name)` syntax | Planned |
-| **OpenTelemetry Metrics** | Enhanced observability integration | Planned |
-| **gRPC Support** | gRPC endpoints | Planned |
+| **GraphQL Endpoint** | `/api/graphql` with auto-generated schema from contracts | Planned |
+| **Change Data Capture** | Track historical changes with entity versioning and temporal queries | Planned |
+| **Fluent Configuration** | `builder.Resource<T>().Field(x => x.Name).Validation(...)` syntax | Planned |
+
+### Medium Priority
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **Cross-backend Expansion** | Expand dynamic entities referencing EF entities and vice versa | Planned |
+| **Async Job Queue** | Background processing for long-running operations with status tracking | Planned |
+| **gRPC Support** | gRPC endpoints alongside REST for high-performance scenarios | Planned |
+| **Real-time Updates** | SignalR/WebSocket integration for live data subscriptions | Planned |
+| **Batch Validation** | Validate multiple entities in a single request before commit | Planned |
+
+### Lower Priority
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **OData Support** | OData query syntax compatibility (`$filter`, `$select`, `$expand`) | Considering |
+| **JSON Patch** | RFC 6902 JSON Patch support for partial updates | Considering |
+| **Conditional Creates** | `If-None-Match: *` header support for idempotent creates | Considering |
+| **Field Masking** | Automatic PII/sensitive data masking in responses | Considering |
+| **Query Cost Analysis** | Estimate and limit query complexity before execution | Considering |
+| **Multi-database Support** | Route different resources to different databases | Considering |
+| **Optimistic Offline Sync** | Conflict resolution for mobile/offline scenarios | Considering |
+| **Schema Migrations** | Track and apply contract changes across environments | Considering |
+
+### Community Suggestions
+
+Have a feature request? Open an issue on GitHub with the `enhancement` label!

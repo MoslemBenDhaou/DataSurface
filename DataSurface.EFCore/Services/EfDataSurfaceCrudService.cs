@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json.Nodes;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
+using DataSurface.Core.Webhooks;
 using DataSurface.EFCore.Caching;
 using DataSurface.EFCore.Context;
 using DataSurface.EFCore.Contracts;
@@ -31,6 +32,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly CrudSecurityDispatcher? _security;
     private readonly DataSurfaceMetrics? _metrics;
     private readonly IQueryResultCache? _cache;
+    private readonly IWebhookPublisher? _webhooks;
 
     /// <summary>
     /// Creates a new CRUD service.
@@ -46,6 +48,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="security">Optional security dispatcher for authorization and audit logging.</param>
     /// <param name="metrics">Optional metrics recorder for observability.</param>
     /// <param name="cache">Optional query result cache for read operations.</param>
+    /// <param name="webhooks">Optional webhook publisher for CRUD event notifications.</param>
     public EfDataSurfaceCrudService(
         DbContext db,
         IResourceContractProvider contracts,
@@ -57,7 +60,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         ILogger<EfDataSurfaceCrudService> logger,
         CrudSecurityDispatcher? security = null,
         DataSurfaceMetrics? metrics = null,
-        IQueryResultCache? cache = null)
+        IQueryResultCache? cache = null,
+        IWebhookPublisher? webhooks = null)
     {
         _db = db;
         _contracts = contracts;
@@ -70,6 +74,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _security = security;
         _metrics = metrics;
         _cache = cache;
+        _webhooks = webhooks;
     }
 
     /// <inheritdoc />
@@ -143,7 +148,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         foreach (var e in pageItems)
             await InvokeTypedAfterRead(e, hookCtx);
 
-        var json = pageItems.Select(e => EntityToJson(e, c, expand)).ToList();
+        var json = pageItems.Select(e => EntityToJson(e, c, expand, spec.Fields)).ToList();
 
         // Apply field-level authorization (redact unauthorized fields)
         _security?.RedactUnauthorizedFields(c, json);
@@ -341,6 +346,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_cache is not null)
             await _cache.InvalidateResourceAsync(resourceKey, ct);
 
+        // Publish webhook event
+        await PublishWebhookAsync(resourceKey, CrudOperation.Create, GetEntityKeyValue(entity, c)?.ToString(), json, ct);
+
         _logger.LogInformation("Created {Resource} in {ElapsedMs}ms", resourceKey, sw.ElapsedMilliseconds);
         return json;
     }
@@ -425,6 +433,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             await _cache.InvalidateAsync(resourceKey, id, ct);
             await _cache.InvalidateResourceAsync(resourceKey, ct);
         }
+
+        // Publish webhook event
+        await PublishWebhookAsync(resourceKey, CrudOperation.Update, id.ToString(), json, ct);
 
         _logger.LogInformation("Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return json;
@@ -527,6 +538,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 await _cache.InvalidateResourceAsync(resourceKey, ct);
             }
 
+            // Publish webhook event
+            await PublishWebhookAsync(resourceKey, CrudOperation.Delete, id.ToString(), null, ct);
+
             _logger.LogInformation("Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
@@ -551,6 +565,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             await _cache.InvalidateAsync(resourceKey, id, ct);
             await _cache.InvalidateResourceAsync(resourceKey, ct);
         }
+
+        // Publish webhook event
+        await PublishWebhookAsync(resourceKey, CrudOperation.Delete, id.ToString(), null, ct);
 
         _logger.LogInformation("Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }
@@ -751,13 +768,30 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         return m.Invoke(_mapper, new object[] { body, c, _db })!;
     }
 
-    private static JsonObject EntityToJson(object entity, ResourceContract c, ExpandSpec? expand)
+    private static JsonObject EntityToJson(object entity, ResourceContract c, ExpandSpec? expand, string? projectedFields = null)
     {
         var o = new JsonObject();
         var readFields = c.Fields.Where(f => f.InRead && !f.Hidden).ToList();
 
+        // Apply field projection if specified
+        if (!string.IsNullOrWhiteSpace(projectedFields))
+        {
+            var requested = new HashSet<string>(
+                projectedFields.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase);
+            readFields = readFields.Where(f => requested.Contains(f.ApiName)).ToList();
+        }
+
         foreach (var f in readFields)
         {
+            // Handle computed fields
+            if (f.Computed && !string.IsNullOrWhiteSpace(f.ComputedExpression))
+            {
+                var computedVal = EvaluateComputedExpression(entity, f.ComputedExpression);
+                o[f.ApiName] = computedVal is null ? null : JsonValue.Create(computedVal?.ToString());
+                continue;
+            }
+
             var p = entity.GetType().GetProperty(f.Name);
             if (p == null) continue;
 
@@ -821,6 +855,71 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         return j;
     }
 
+    private static object? EvaluateComputedExpression(object entity, string expression)
+    {
+        // Simple expression evaluator supporting property concatenation
+        // Format: "PropertyA + ' ' + PropertyB" or just "PropertyA"
+        try
+        {
+            var entityType = entity.GetType();
+            var parts = expression.Split(new[] { " + " }, StringSplitOptions.None);
+            var result = new System.Text.StringBuilder();
+
+            foreach (var part in parts)
+            {
+                var trimmed = part.Trim();
+
+                // String literal (single quotes)
+                if (trimmed.StartsWith("'") && trimmed.EndsWith("'"))
+                {
+                    result.Append(trimmed[1..^1]);
+                    continue;
+                }
+
+                // Property reference
+                var prop = entityType.GetProperty(trimmed);
+                if (prop is not null)
+                {
+                    var val = prop.GetValue(entity);
+                    result.Append(val?.ToString() ?? "");
+                }
+            }
+
+            return result.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task PublishWebhookAsync(
+        string resourceKey,
+        CrudOperation operation,
+        string? entityId,
+        JsonObject? payload,
+        CancellationToken ct)
+    {
+        if (_webhooks is null) return;
+
+        try
+        {
+            var webhookEvent = new WebhookEvent(
+                resourceKey,
+                operation,
+                entityId,
+                payload,
+                DateTime.UtcNow);
+
+            await _webhooks.PublishAsync(webhookEvent, ct);
+        }
+        catch (Exception ex)
+        {
+            // Don't fail the operation if webhook publishing fails
+            _logger.LogWarning(ex, "Failed to publish webhook for {Operation} on {Resource}", operation, resourceKey);
+        }
+    }
+
     private static void ValidateBody(ResourceContract c, CrudOperation op, JsonObject body)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
@@ -862,7 +961,70 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             }
         }
 
+        // Field-level validation (MinLength, MaxLength, Min, Max, Regex, AllowedValues)
+        foreach (var kv in body)
+        {
+            var field = c.Fields.FirstOrDefault(f => f.ApiName.Equals(kv.Key, StringComparison.OrdinalIgnoreCase));
+            if (field is null || field.Hidden) continue;
+
+            var val = field.Validation;
+            var node = kv.Value;
+            var fieldErrors = new List<string>();
+
+            // String validations
+            if (node is not null && field.Type == Core.Enums.FieldType.String)
+            {
+                var strVal = node.GetValue<string?>();
+                if (strVal is not null)
+                {
+                    if (val.MinLength.HasValue && strVal.Length < val.MinLength.Value)
+                        fieldErrors.Add($"Minimum length is {val.MinLength.Value}.");
+
+                    if (val.MaxLength.HasValue && strVal.Length > val.MaxLength.Value)
+                        fieldErrors.Add($"Maximum length is {val.MaxLength.Value}.");
+
+                    if (!string.IsNullOrEmpty(val.Regex))
+                    {
+                        try
+                        {
+                            if (!System.Text.RegularExpressions.Regex.IsMatch(strVal, val.Regex))
+                                fieldErrors.Add($"Value does not match required pattern.");
+                        }
+                        catch { /* Invalid regex in contract */ }
+                    }
+
+                    if (val.AllowedValues is { Count: > 0 })
+                    {
+                        if (!val.AllowedValues.Contains(strVal, StringComparer.OrdinalIgnoreCase))
+                            fieldErrors.Add($"Value must be one of: {string.Join(", ", val.AllowedValues)}.");
+                    }
+                }
+            }
+
+            // Numeric validations (decimal covers int, long, etc.)
+            if (node is not null && IsNumericFieldType(field.Type))
+            {
+                try
+                {
+                    var numVal = node.GetValue<decimal>();
+
+                    if (val.Min.HasValue && numVal < val.Min.Value)
+                        fieldErrors.Add($"Minimum value is {val.Min.Value}.");
+
+                    if (val.Max.HasValue && numVal > val.Max.Value)
+                        fieldErrors.Add($"Maximum value is {val.Max.Value}.");
+                }
+                catch { /* Value not a valid number */ }
+            }
+
+            if (fieldErrors.Count > 0)
+                errors[kv.Key] = fieldErrors.ToArray();
+        }
+
         if (errors.Count > 0)
             throw new CrudRequestValidationException(errors);
     }
+
+    private static bool IsNumericFieldType(Core.Enums.FieldType type)
+        => type is Core.Enums.FieldType.Int32 or Core.Enums.FieldType.Int64 or Core.Enums.FieldType.Decimal;
 }

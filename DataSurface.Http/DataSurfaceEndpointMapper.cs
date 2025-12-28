@@ -93,6 +93,26 @@ public static class DataSurfaceEndpointMapper
         .WithTags("Dynamic")
         .WithMetadata(new DataSurfaceCrudEndpointMetadata("*", CrudOperation.List));
 
+        // HEAD dynamic: HEAD /api/d/{route} (count only)
+        dyn.MapMethods("/{route}", new[] { "HEAD" }, async (string route, HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
+        {
+            try
+            {
+                var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
+                var contract = await dynProvider.TryGetByRouteAsync(route, ct);
+                if (contract is null) return Results.NotFound();
+
+                return await HandleHead(contract, req, res, sp, opt, ct);
+            }
+            catch (Exception ex)
+            {
+                return DataSurfaceHttpErrorMapper.ToProblem(ex, req.HttpContext);
+            }
+        })
+        .WithName("DataSurface.Dynamic.Head")
+        .WithTags("Dynamic")
+        .WithMetadata(new DataSurfaceCrudEndpointMetadata("*", CrudOperation.List));
+
         // GET dynamic: GET /api/d/{route}/{id}
         dyn.MapGet("/{route}/{id}", async (string route, string id, HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
         {
@@ -343,18 +363,34 @@ public static class DataSurfaceEndpointMapper
 
     private static void ApplyAuth(RouteHandlerBuilder ep, ResourceContract c, CrudOperation op, DataSurfaceHttpOptions opt)
     {
+        // Authorization
         if (c.Security.Policies.TryGetValue(op, out var policy) && !string.IsNullOrWhiteSpace(policy))
         {
             ep.RequireAuthorization(policy);
-            return;
         }
-
-        if (opt.RequireAuthorizationByDefault)
+        else if (opt.RequireAuthorizationByDefault)
         {
             if (!string.IsNullOrWhiteSpace(opt.DefaultPolicy))
                 ep.RequireAuthorization(opt.DefaultPolicy);
             else
                 ep.RequireAuthorization();
+        }
+
+        // Rate limiting
+        if (opt.EnableRateLimiting && !string.IsNullOrWhiteSpace(opt.RateLimitingPolicy))
+        {
+            ep.RequireRateLimiting(opt.RateLimitingPolicy);
+        }
+
+        // API key authentication
+        if (opt.EnableApiKeyAuth)
+        {
+            ep.AddEndpointFilterFactory((context, next) =>
+            {
+                var validator = context.ApplicationServices.GetService<IApiKeyValidator>();
+                var filter = new DataSurfaceApiKeyFilter(opt, validator);
+                return invocationContext => filter.InvokeAsync(invocationContext, next);
+            });
         }
     }
 
@@ -529,8 +565,20 @@ public static class DataSurfaceEndpointMapper
 
         var keyObj = ParseId(id, c);
 
-        // For PUT, we need to ensure all required fields are present (full replacement)
-        // The update service will handle validation
+        // For PUT (full replacement), validate that all updatable fields are present
+        var oc = c.Operations[CrudOperation.Update];
+        var missing = oc.InputShape
+            .Where(fieldName => !body.ContainsKey(fieldName))
+            .ToList();
+
+        if (missing.Count > 0)
+        {
+            var errors = missing.ToDictionary(
+                f => f, 
+                _ => new[] { "Field is required for PUT (full replacement)." });
+            return Results.ValidationProblem(errors, title: "PUT requires all updatable fields");
+        }
+
         var updated = await crud.UpdateAsync(c.ResourceKey, keyObj, body, ct);
 
         DataSurfaceHttpEtags.TrySetEtag(res, c, updated, opt.EnableEtags);

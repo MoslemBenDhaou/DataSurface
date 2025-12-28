@@ -47,9 +47,69 @@ public sealed class EfCrudMapper
         where TEntity : class, new()
     {
         var entity = new TEntity();
+        ApplyDefaultValues(entity, body, contract);
         ApplyFields(entity, body, contract, CrudOperation.Create, db);
         ApplyRelationWrites(entity, body, contract, CrudOperation.Create, db);
         return entity;
+    }
+
+    private void ApplyDefaultValues<TEntity>(TEntity entity, JsonObject body, ResourceContract contract)
+        where TEntity : class
+    {
+        foreach (var field in contract.Fields)
+        {
+            if (field.DefaultValue is null) continue;
+            if (field.Hidden || !field.InCreate) continue;
+            
+            // Only apply default if field not provided in body
+            if (body.ContainsKey(field.ApiName)) continue;
+
+            var prop = typeof(TEntity).GetProperty(field.Name);
+            if (prop == null || !prop.CanWrite) continue;
+
+            try
+            {
+                var defaultVal = ConvertDefaultValue(field.DefaultValue, prop.PropertyType);
+                prop.SetValue(entity, defaultVal);
+            }
+            catch { /* Skip if conversion fails */ }
+        }
+    }
+
+    private static object? ConvertDefaultValue(object defaultValue, Type targetType)
+    {
+        if (defaultValue is null) return null;
+
+        var nonNullable = Nullable.GetUnderlyingType(targetType) ?? targetType;
+
+        if (nonNullable == defaultValue.GetType())
+            return defaultValue;
+
+        if (nonNullable == typeof(string))
+            return defaultValue.ToString();
+
+        if (nonNullable == typeof(int))
+            return Convert.ToInt32(defaultValue);
+
+        if (nonNullable == typeof(long))
+            return Convert.ToInt64(defaultValue);
+
+        if (nonNullable == typeof(decimal))
+            return Convert.ToDecimal(defaultValue);
+
+        if (nonNullable == typeof(bool))
+            return Convert.ToBoolean(defaultValue);
+
+        if (nonNullable == typeof(DateTime))
+            return DateTime.Parse(defaultValue.ToString()!);
+
+        if (nonNullable == typeof(Guid))
+            return Guid.Parse(defaultValue.ToString()!);
+
+        if (nonNullable.IsEnum)
+            return Enum.Parse(nonNullable, defaultValue.ToString()!, ignoreCase: true);
+
+        return Convert.ChangeType(defaultValue, nonNullable);
     }
 
     /// <summary>

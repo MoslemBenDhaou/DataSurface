@@ -97,6 +97,7 @@ public sealed class ContractBuilder
         var relations = new List<RelationContract>();
 
         ConcurrencyContract? concurrency = null;
+        TenantContract? tenant = null;
 
         foreach (var p in clrType.GetProperties(BindingFlags.Instance | BindingFlags.Public))
         {
@@ -109,6 +110,13 @@ public sealed class ContractBuilder
                 var apiName = ToApiName(p.Name);
                 concurrency = new ConcurrencyContract(cc.Mode, apiName, cc.RequiredOnUpdate);
                 // still treat it as a field if annotated or default-included
+            }
+
+            // Tenant field
+            var ta = p.GetCustomAttribute<CrudTenantAttribute>();
+            if (ta != null)
+            {
+                tenant = new TenantContract(p.Name, ToApiName(p.Name), ta.ClaimType, ta.Required);
             }
 
             if (IsNavigationProperty(p))
@@ -287,7 +295,8 @@ public sealed class ContractBuilder
             Fields: fields,
             Relations: relations,
             Operations: ops,
-            Security: new SecurityContract(policies)
+            Security: new SecurityContract(policies),
+            Tenant: tenant
         );
     }
 

@@ -1,3 +1,4 @@
+using DataSurface.Core;
 using DataSurface.Core.ContractBuilderModels;
 
 namespace DataSurface.EFCore.Options;
@@ -7,6 +8,13 @@ namespace DataSurface.EFCore.Options;
 /// </summary>
 public sealed class DataSurfaceEfCoreOptions
 {
+    /// <summary>
+    /// Feature flags controlling which DataSurface capabilities are enabled.
+    /// Use <see cref="DataSurfaceFeatures.Minimal"/>, <see cref="DataSurfaceFeatures.Standard"/>,
+    /// or <see cref="DataSurfaceFeatures.Full"/> presets, or configure individual features.
+    /// </summary>
+    public DataSurfaceFeatures Features { get; set; } = DataSurfaceFeatures.Standard;
+
     /// <summary>
     /// When <see langword="true"/>, automatically registers resource CLR types with the EF model based on
     /// discovered contracts.

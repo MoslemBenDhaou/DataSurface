@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Security.Claims;
 using System.Text.Json.Nodes;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
@@ -78,6 +79,96 @@ public sealed class CrudSecurityDispatcher
         where TEntity : class
     {
         return ApplyResourceFilter((IQueryable<TEntity>)query, contract);
+    }
+
+    /// <summary>
+    /// Applies tenant isolation filter to a query based on the contract's tenant configuration.
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <param name="query">The query to filter.</param>
+    /// <param name="contract">The resource contract.</param>
+    /// <returns>The filtered query.</returns>
+    /// <exception cref="UnauthorizedAccessException">Thrown when tenant claim is required but missing.</exception>
+    public IQueryable<TEntity> ApplyTenantFilter<TEntity>(IQueryable<TEntity> query, ResourceContract contract)
+        where TEntity : class
+    {
+        if (contract.Tenant is null) return query;
+
+        var tenantValue = GetTenantValue(contract.Tenant);
+        if (tenantValue is null)
+        {
+            if (contract.Tenant.Required)
+                throw new UnauthorizedAccessException($"Tenant claim '{contract.Tenant.ClaimType}' is required but was not found.");
+            return query;
+        }
+
+        // Build filter expression: e => e.TenantField == tenantValue
+        var param = Expression.Parameter(typeof(TEntity), "e");
+        var prop = Expression.Property(param, contract.Tenant.FieldName);
+        var constant = Expression.Constant(tenantValue, prop.Type);
+        var eq = Expression.Equal(prop, constant);
+        var lambda = Expression.Lambda<Func<TEntity, bool>>(eq, param);
+
+        return query.Where(lambda);
+    }
+
+    /// <summary>
+    /// Applies tenant isolation filter to a non-generic query.
+    /// </summary>
+    public IQueryable ApplyTenantFilter(IQueryable query, Type entityType, ResourceContract contract)
+    {
+        if (contract.Tenant is null) return query;
+
+        var method = typeof(CrudSecurityDispatcher)
+            .GetMethod(nameof(ApplyTenantFilterInternal),
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .MakeGenericMethod(entityType);
+
+        return (IQueryable)method.Invoke(this, [query, contract])!;
+    }
+
+    private IQueryable<TEntity> ApplyTenantFilterInternal<TEntity>(IQueryable query, ResourceContract contract)
+        where TEntity : class
+    {
+        return ApplyTenantFilter((IQueryable<TEntity>)query, contract);
+    }
+
+    /// <summary>
+    /// Sets the tenant value on an entity during create operations.
+    /// </summary>
+    /// <param name="entity">The entity to set the tenant on.</param>
+    /// <param name="contract">The resource contract.</param>
+    /// <exception cref="UnauthorizedAccessException">Thrown when tenant claim is required but missing.</exception>
+    public void SetTenantValue(object entity, ResourceContract contract)
+    {
+        if (contract.Tenant is null) return;
+
+        var tenantValue = GetTenantValue(contract.Tenant);
+        if (tenantValue is null)
+        {
+            if (contract.Tenant.Required)
+                throw new UnauthorizedAccessException($"Tenant claim '{contract.Tenant.ClaimType}' is required but was not found.");
+            return;
+        }
+
+        var prop = entity.GetType().GetProperty(contract.Tenant.FieldName);
+        if (prop is not null && prop.CanWrite)
+        {
+            var convertedValue = Convert.ChangeType(tenantValue, prop.PropertyType);
+            prop.SetValue(entity, convertedValue);
+        }
+    }
+
+    private string? GetTenantValue(TenantContract tenant)
+    {
+        // Try to get tenant resolver from DI
+        var resolver = _sp.GetService<ITenantResolver>();
+        if (resolver is not null)
+            return resolver.GetTenantId();
+
+        // Fallback: try to get ClaimsPrincipal from DI (registered by ASP.NET Core)
+        var principal = _sp.GetService<System.Security.Claims.ClaimsPrincipal>();
+        return principal?.FindFirst(tenant.ClaimType)?.Value;
     }
 
     /// <summary>

@@ -47,11 +47,11 @@ public sealed class DataSurfaceEfCoreOptions
     /// <summary>
     /// Assemblies to scan for resource types when building the static contract set.
     /// </summary>
-    public IReadOnlyList<System.Reflection.Assembly> AssembliesToScan { get; init; } = [];
+    public IReadOnlyList<System.Reflection.Assembly> AssembliesToScan { get; set; } = [];
 
     // If you want to hide fields unless annotated (safe default)
     /// <summary>
     /// Options passed to the Core <c>ContractBuilder</c> when generating resource contracts from CLR types.
     /// </summary>
-    public ContractBuilderOptions ContractBuilderOptions { get; init; } = new();
+    public ContractBuilderOptions ContractBuilderOptions { get; set; } = new();
 }

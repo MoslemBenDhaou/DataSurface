@@ -69,22 +69,20 @@ public sealed class ContractBuilder
         var (keyName, keyType) = DiscoverKey(clrType, ra.KeyProperty);
         var key = new ResourceKeyContract(keyName, keyType);
 
-        // security policies: default naming; can be overridden by [CrudAuthorize]
-        var policies = new Dictionary<CrudOperation, string?>()
-        {
-            [CrudOperation.List]   = $"{ra.Route}.read",
-            [CrudOperation.Get]    = $"{ra.Route}.read",
-            [CrudOperation.Create] = $"{ra.Route}.create",
-            [CrudOperation.Update] = $"{ra.Route}.update",
-            [CrudOperation.Delete] = $"{ra.Route}.delete",
-        };
+        // security policies: opt-in via [CrudAuthorize] attribute
+        // By default, no authorization is required - policies are only set when explicitly configured
+        var policies = new Dictionary<CrudOperation, string?>();
 
         foreach (var auth in clrType.GetCustomAttributes<CrudAuthorizeAttribute>())
         {
             if (auth.Operation is null)
             {
-                foreach (var op in policies.Keys.ToArray())
-                    policies[op] = auth.Policy;
+                // Apply to all operations
+                policies[CrudOperation.List] = auth.Policy;
+                policies[CrudOperation.Get] = auth.Policy;
+                policies[CrudOperation.Create] = auth.Policy;
+                policies[CrudOperation.Update] = auth.Policy;
+                policies[CrudOperation.Delete] = auth.Policy;
             }
             else
             {

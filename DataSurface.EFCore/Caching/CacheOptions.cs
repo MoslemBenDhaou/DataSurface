@@ -34,7 +34,7 @@ public sealed class ResourceCacheConfig
     /// <summary>
     /// Gets or sets whether caching is enabled for this resource.
     /// </summary>
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; } = false;
 
     /// <summary>
     /// Gets or sets the cache duration for this resource.
@@ -44,10 +44,10 @@ public sealed class ResourceCacheConfig
     /// <summary>
     /// Gets or sets whether to cache list operations.
     /// </summary>
-    public bool CacheList { get; set; } = true;
+    public bool CacheList { get; set; } = false;
 
     /// <summary>
     /// Gets or sets whether to cache get operations.
     /// </summary>
-    public bool CacheGet { get; set; } = true;
+    public bool CacheGet { get; set; } = false;
 }

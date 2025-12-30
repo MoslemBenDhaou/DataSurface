@@ -13,13 +13,13 @@ public sealed class DataSurfaceEfCoreOptions
     /// Use <see cref="DataSurfaceFeatures.Minimal"/>, <see cref="DataSurfaceFeatures.Standard"/>,
     /// or <see cref="DataSurfaceFeatures.Full"/> presets, or configure individual features.
     /// </summary>
-    public DataSurfaceFeatures Features { get; set; } = DataSurfaceFeatures.Standard;
+    public DataSurfaceFeatures Features { get; set; } = DataSurfaceFeatures.Minimal;
 
     /// <summary>
     /// When <see langword="true"/>, automatically registers resource CLR types with the EF model based on
     /// discovered contracts.
     /// </summary>
-    public bool AutoRegisterCrudEntities { get; set; } = true;
+    public bool AutoRegisterCrudEntities { get; set; } = false;
 
     // Conventions
     /// <summary>
@@ -28,16 +28,16 @@ public sealed class DataSurfaceEfCoreOptions
     /// <remarks>
     /// The default convention applies to entities implementing <c>ISoftDelete</c> and filters on <c>IsDeleted == false</c>.
     /// </remarks>
-    public bool EnableSoftDeleteFilter { get; set; } = true;        // if entity has IsDeleted
+    public bool EnableSoftDeleteFilter { get; set; } = false;
     /// <summary>
     /// When <see langword="true"/>, configures a <c>RowVersion</c> <see cref="byte"/> array property as an EF rowversion.
     /// </summary>
-    public bool EnableRowVersionConvention { get; set; } = true;    // if entity has RowVersion byte[]
+    public bool EnableRowVersionConvention { get; set; } = false;
     /// <summary>
     /// When <see langword="true"/>, automatically populates <c>CreatedAt</c> and <c>UpdatedAt</c> for entities
     /// implementing <see cref="Interfaces.ITimestamped"/>.
     /// </summary>
-    public bool EnableTimestampConvention { get; set; } = true;     // if entity has ITimestamped
+    public bool EnableTimestampConvention { get; set; } = false;
     /// <summary>
     /// When <see langword="true"/>, uses camelCase API names consistent with the Core contract builder conventions.
     /// </summary>

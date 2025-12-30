@@ -23,6 +23,7 @@ public sealed class DataSurfaceAdminOptions
 
     /// <summary>
     /// Gets or sets the authorization policy name used when <see cref="RequireAuthorization"/> is enabled.
+    /// If null, uses the default authorization policy.
     /// </summary>
-    public string? Policy { get; set; } = "DataSurfaceAdmin";
+    public string? Policy { get; set; } = null;
 }

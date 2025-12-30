@@ -990,7 +990,11 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                             if (!System.Text.RegularExpressions.Regex.IsMatch(strVal, val.Regex))
                                 fieldErrors.Add($"Value does not match required pattern.");
                         }
-                        catch { /* Invalid regex in contract */ }
+                        catch (ArgumentException)
+                        {
+                            // Invalid regex pattern in contract configuration - treat as validation error
+                            fieldErrors.Add($"Field has invalid validation pattern configured. Contact administrator.");
+                        }
                     }
 
                     if (val.AllowedValues is { Count: > 0 })
@@ -1014,7 +1018,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                     if (val.Max.HasValue && numVal > val.Max.Value)
                         fieldErrors.Add($"Maximum value is {val.Max.Value}.");
                 }
-                catch { /* Value not a valid number */ }
+                catch (FormatException)
+                {
+                    fieldErrors.Add($"Value must be a valid number.");
+                }
+                catch (InvalidOperationException)
+                {
+                    fieldErrors.Add($"Value must be a valid number.");
+                }
             }
 
             if (fieldErrors.Count > 0)

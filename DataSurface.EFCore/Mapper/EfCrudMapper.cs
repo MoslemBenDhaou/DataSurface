@@ -64,7 +64,8 @@ public sealed class EfCrudMapper
             // Only apply default if field not provided in body
             if (body.ContainsKey(field.ApiName)) continue;
 
-            var prop = typeof(TEntity).GetProperty(field.Name);
+            // Use entity.GetType() instead of typeof(TEntity) to get actual runtime type
+            var prop = entity.GetType().GetProperty(field.Name);
             if (prop == null || !prop.CanWrite) continue;
 
             try
@@ -155,7 +156,8 @@ public sealed class EfCrudMapper
 
             if (op == CrudOperation.Update && field.Immutable) continue;
 
-            var prop = typeof(TEntity).GetProperty(field.Name);
+            // Use entity.GetType() instead of typeof(TEntity) to get actual runtime type
+            var prop = entity.GetType().GetProperty(field.Name);
             if (prop == null || !prop.CanWrite) continue;
 
             // PATCH-like: only apply provided keys (body enumerates only provided anyway)
@@ -198,6 +200,11 @@ public sealed class EfCrudMapper
             var concurrencyField = contract.Fields.FirstOrDefault(f =>
                 f.ApiName.Equals(cc.FieldApiName, StringComparison.OrdinalIgnoreCase));
             var propName = concurrencyField?.Name ?? "RowVersion";
+            
+            // Check if property exists on the actual entity type
+            var concurrencyProp = entity.GetType().GetProperty(propName);
+            if (concurrencyProp == null) return;
+            
             entry.Property(propName).OriginalValue = bytes;
         }
     }

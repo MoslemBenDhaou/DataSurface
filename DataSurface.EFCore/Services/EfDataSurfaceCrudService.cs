@@ -679,14 +679,26 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
     private IQueryable ApplyExpand(IQueryable query, ResourceContract c, ExpandSpec? expand)
     {
-        if (expand is null || expand.Expand.Count == 0) return query;
+        // Merge default expanded relations with explicitly requested expansions
+        var toExpand = new HashSet<string>(c.Read.DefaultExpand, StringComparer.OrdinalIgnoreCase);
+        if (expand is not null)
+        {
+            foreach (var e in expand.Expand)
+                toExpand.Add(e);
+        }
+
+        if (toExpand.Count == 0) return query;
 
         var allowed = new HashSet<string>(c.Read.ExpandAllowed, StringComparer.OrdinalIgnoreCase);
-        foreach (var e in expand.Expand)
+        foreach (var apiName in toExpand)
         {
-            if (!allowed.Contains(e)) continue;
+            if (!allowed.Contains(apiName)) continue;
 
-            // use string-based Include to avoid generic constraints
+            // Find the relation to get the CLR property name
+            var rel = c.Relations.FirstOrDefault(r => r.ApiName.Equals(apiName, StringComparison.OrdinalIgnoreCase));
+            if (rel is null) continue;
+
+            // use string-based Include with CLR property name (not API name)
             query = (IQueryable)typeof(EntityFrameworkQueryableExtensions)
                 .GetMethods()
                 .Single(m => m.Name == "Include"
@@ -695,7 +707,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                              && m.GetParameters().Length == 2
                              && m.GetParameters()[1].ParameterType == typeof(string))
                 .MakeGenericMethod(query.ElementType)
-                .Invoke(null, new object?[] { query, e })!;
+                .Invoke(null, new object?[] { query, rel.Name })!;
 
         }
 
@@ -800,10 +812,18 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         // expand: include nav objects as nested JSON (depth 1)
-        if (expand is not null && expand.Expand.Count > 0)
+        // Merge default expanded relations with explicitly requested expansions
+        var toSerialize = new HashSet<string>(c.Read.DefaultExpand, StringComparer.OrdinalIgnoreCase);
+        if (expand is not null)
+        {
+            foreach (var e in expand.Expand)
+                toSerialize.Add(e);
+        }
+
+        if (toSerialize.Count > 0)
         {
             var allowed = new HashSet<string>(c.Read.ExpandAllowed, StringComparer.OrdinalIgnoreCase);
-            foreach (var relApi in expand.Expand.Where(x => allowed.Contains(x)))
+            foreach (var relApi in toSerialize.Where(x => allowed.Contains(x)))
             {
                 var rel = c.Relations.FirstOrDefault(r => r.ApiName.Equals(relApi, StringComparison.OrdinalIgnoreCase));
                 if (rel == null) continue;

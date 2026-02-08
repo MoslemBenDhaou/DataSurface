@@ -41,6 +41,21 @@ public sealed class EfCrudQueryEngine
         var page = Math.Max(1, spec.Page);
         var pageSize = Math.Clamp(spec.PageSize, 1, contract.Query.MaxPageSize);
 
+        query = ApplyFiltersAndSort(query, contract, spec);
+
+        return query.Skip((page - 1) * pageSize).Take(pageSize);
+    }
+
+    /// <summary>
+    /// Applies filtering, searching and sorting from <paramref name="spec"/> without pagination.
+    /// Use this to obtain a filtered query suitable for counting before applying Skip/Take.
+    /// </summary>
+    public IQueryable<TEntity> ApplyFiltersAndSort<TEntity>(
+        IQueryable<TEntity> query,
+        ResourceContract contract,
+        QuerySpec spec)
+        where TEntity : class
+    {
         if (spec.Filters != null && spec.Filters.Count > 0)
             query = ApplyFilters(query, contract, spec.Filters);
 
@@ -50,7 +65,7 @@ public sealed class EfCrudQueryEngine
         if (!string.IsNullOrWhiteSpace(spec.Sort))
             query = ApplySort(query, contract, spec.Sort!);
 
-        return query.Skip((page - 1) * pageSize).Take(pageSize);
+        return query;
     }
 
     private static IQueryable<TEntity> ApplySearch<TEntity>(
@@ -201,6 +216,8 @@ public sealed class EfCrudQueryEngine
             if (t == typeof(int)) return int.Parse(raw);
             if (t == typeof(long)) return long.Parse(raw);
             if (t == typeof(decimal)) return decimal.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
+            if (t == typeof(double)) return double.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
+            if (t == typeof(float)) return float.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
             if (t == typeof(bool)) return bool.Parse(raw);
             if (t == typeof(Guid)) return Guid.Parse(raw);
             if (t == typeof(DateTime)) return DateTime.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);

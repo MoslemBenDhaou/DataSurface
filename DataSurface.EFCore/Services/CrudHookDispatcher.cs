@@ -10,7 +10,6 @@ namespace DataSurface.EFCore.Services;
 public sealed class CrudHookDispatcher
 {
     private readonly IServiceProvider _sp;
-    private readonly Lazy<IReadOnlyList<ICrudHook>> _globalHooks;
 
     /// <summary>
     /// Creates a new dispatcher.
@@ -19,9 +18,6 @@ public sealed class CrudHookDispatcher
     public CrudHookDispatcher(IServiceProvider sp)
     {
         _sp = sp;
-        // Cache and sort global hooks once at construction to avoid repeated enumeration
-        _globalHooks = new Lazy<IReadOnlyList<ICrudHook>>(() =>
-            _sp.GetServices<ICrudHook>().OrderBy(h => h.Order).ToList());
     }
 
     /// <summary>
@@ -30,7 +26,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task BeforeGlobalAsync(CrudHookContext ctx)
     {
-        foreach (var h in _globalHooks.Value) await h.BeforeAsync(ctx);
+        foreach (var h in ResolveGlobalHooks()) await h.BeforeAsync(ctx);
     }
 
     /// <summary>
@@ -39,8 +35,11 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task AfterGlobalAsync(CrudHookContext ctx)
     {
-        foreach (var h in _globalHooks.Value) await h.AfterAsync(ctx);
+        foreach (var h in ResolveGlobalHooks()) await h.AfterAsync(ctx);
     }
+
+    private IReadOnlyList<ICrudHook> ResolveGlobalHooks()
+        => _sp.GetServices<ICrudHook>().OrderBy(h => h.Order).ToList();
 
     /// <summary>
     /// Invokes typed hooks before a create operation.

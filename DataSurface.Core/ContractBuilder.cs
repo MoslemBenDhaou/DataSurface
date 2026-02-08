@@ -367,10 +367,10 @@ public sealed class ContractBuilder
     private static (bool inRead, bool inCreate, bool inUpdate, bool filterable, bool sortable) DefaultScalarMembership()
         => (inRead: true, inCreate: false, inUpdate: false, filterable: false, sortable: false);
 
-    private static string ToApiName(string clrName)
+    private string ToApiName(string clrName)
     {
-        // simple camelCase
         if (string.IsNullOrEmpty(clrName)) return clrName;
+        if (!_opt.UseCamelCaseApiNames) return clrName;
         return char.ToLowerInvariant(clrName[0]) + clrName[1..];
     }
 
@@ -409,6 +409,7 @@ public sealed class ContractBuilder
             || t == typeof(Guid)
             || t == typeof(double) || t == typeof(float)
             || t == typeof(byte[]) // treat as scalar
+            || t == typeof(string[]) || t == typeof(int[]) || t == typeof(Guid[]) || t == typeof(decimal[])
             ;
     }
 
@@ -425,6 +426,8 @@ public sealed class ContractBuilder
         if (t == typeof(bool)) return (FieldType.Boolean, nullable);
         if (t == typeof(DateTime)) return (FieldType.DateTime, nullable);
         if (t == typeof(Guid)) return (FieldType.Guid, nullable);
+        if (t == typeof(double)) return (FieldType.Decimal, nullable);
+        if (t == typeof(float)) return (FieldType.Decimal, nullable);
 
         if (t.IsEnum) return (FieldType.Enum, nullable);
 

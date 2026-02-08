@@ -99,8 +99,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.List);
 
-        // Check cache only when no security features are active (to avoid serving cached data across users)
-        var useCache = _cache is not null && _security is null;
+        // Check cache only when no per-user security features are active (to avoid serving cached data across users)
+        var useCache = _cache is not null && !HasPerUserSecurity(c);
         string? cacheKey = null;
         if (useCache)
         {
@@ -138,10 +138,15 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             ? _security.ApplyResourceFilter(set, clrType, c) 
             : set;
 
+        // Apply tenant isolation filter
+        if (_security is not null && c.Tenant is not null)
+            filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
+
         var baseQuery = ApplyExpand(filteredSet, c, expand);
+        var filtered = ApplyFilterSpec(baseQuery, clrType, c, spec);
         var shaped = ApplyQuerySpec(baseQuery, clrType, c, spec);
 
-        var total = await CountAsync(baseQuery, ct);
+        var total = await CountAsync(filtered, ct);
         var pageItems = await ToListAsync(shaped, ct);
 
         // optional: after-read hook per item (expensive; still useful)
@@ -200,8 +205,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Get);
 
-        // Check cache only when no security features are active (to avoid serving cached data across users)
-        var useCache = _cache is not null && _security is null;
+        // Check cache only when no per-user security features are active (to avoid serving cached data across users)
+        var useCache = _cache is not null && !HasPerUserSecurity(c);
         if (useCache)
         {
             var cached = await _cache!.GetAsync(resourceKey, id, ct);
@@ -236,6 +241,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var filteredSet = _security is not null 
             ? _security.ApplyResourceFilter(set, clrType, c) 
             : set;
+
+        // Apply tenant isolation filter
+        if (_security is not null && c.Tenant is not null)
+            filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
 
         var q = ApplyExpand(filteredSet, c, expand);
 
@@ -319,6 +328,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var (clrType, _) = ResolveSet(c);
         var entity = CreateEntityByType(clrType, body, c);
 
+        // Set tenant value on new entity
+        if (_security is not null && c.Tenant is not null)
+            _security.SetTenantValue(entity, c);
+
         await InvokeTypedBeforeCreate(entity, body, hookCtx);
 
         _db.Add(entity);
@@ -398,6 +411,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             ? _security.ApplyResourceFilter(set, clrType, c) 
             : set;
 
+        // Apply tenant isolation filter
+        if (_security is not null && c.Tenant is not null)
+            filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
+
         var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
 
         // Resource-level authorization check
@@ -409,7 +426,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await InvokeTypedBeforeUpdate(entity, patch, hookCtx);
 
-        _mapper.ApplyUpdate(entity, patch, c, _db);
+        InvokeTypedApplyUpdate(entity, patch, c);
         await _db.SaveChangesAsync(ct);
 
         await InvokeTypedAfterUpdate(entity, hookCtx);
@@ -481,6 +498,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var filteredSet = _security is not null 
             ? _security.ApplyResourceFilter(set, clrType, c) 
             : set;
+
+        // Apply tenant isolation filter
+        if (_security is not null && c.Tenant is not null)
+            filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
 
         var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
 
@@ -621,6 +642,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         return (Task)m.Invoke(_hooks, new object[] { entity, ctx })!;
     }
 
+    private void InvokeTypedApplyUpdate(object entity, JsonObject patch, ResourceContract c)
+    {
+        var m = typeof(EfCrudMapper).GetMethod(nameof(EfCrudMapper.ApplyUpdate))!
+            .MakeGenericMethod(entity.GetType());
+        m.Invoke(_mapper, new object[] { entity, patch, c, _db });
+    }
+
     private Task InvokeTypedBeforeDelete(object entity, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.BeforeDeleteAsync))!
@@ -643,6 +671,15 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             Db = _db,
             Services = _sp
         };
+
+    private bool HasPerUserSecurity(ResourceContract c)
+    {
+        if (c.Tenant is not null) return true;
+        if (_security is null) return false;
+        if (_sp.GetService(typeof(IFieldAuthorizer)) is not null) return true;
+        if (((IEnumerable<IResourceFilter>)_sp.GetService(typeof(IEnumerable<IResourceFilter>))!).Any()) return true;
+        return false;
+    }
 
     private CrudServiceContext NewSvcCtx()
         => new()
@@ -719,6 +756,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // Use EfCrudQueryEngine only for generic TEntity; here we’re Type-based.
         // Minimal: call engine via reflection.
         var m = typeof(EfCrudQueryEngine).GetMethod(nameof(EfCrudQueryEngine.Apply))!
+            .MakeGenericMethod(clrType);
+        return (IQueryable)m.Invoke(_query, new object[] { query, c, spec })!;
+    }
+
+    private IQueryable ApplyFilterSpec(IQueryable query, Type clrType, ResourceContract c, QuerySpec spec)
+    {
+        var m = typeof(EfCrudQueryEngine).GetMethod(nameof(EfCrudQueryEngine.ApplyFiltersAndSort))!
             .MakeGenericMethod(clrType);
         return (IQueryable)m.Invoke(_query, new object[] { query, c, spec })!;
     }
@@ -800,7 +844,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             if (f.Computed && !string.IsNullOrWhiteSpace(f.ComputedExpression))
             {
                 var computedVal = EvaluateComputedExpression(entity, f.ComputedExpression);
-                o[f.ApiName] = computedVal is null ? null : JsonValue.Create(computedVal?.ToString());
+                o[f.ApiName] = computedVal is null ? null : JsonValue.Create(computedVal);
                 continue;
             }
 
@@ -822,6 +866,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         if (toSerialize.Count > 0)
         {
+            // Derive camelCase convention from the contract: if any field has a PascalCase
+            // CLR name but a camelCase API name, the convention is camelCase.
+            var useCamelCase = c.Fields.Any(f =>
+                f.Name.Length > 0 && f.ApiName.Length > 0 &&
+                char.IsUpper(f.Name[0]) && char.IsLower(f.ApiName[0]));
+
             var allowed = new HashSet<string>(c.Read.ExpandAllowed, StringComparer.OrdinalIgnoreCase);
             foreach (var relApi in toSerialize.Where(x => allowed.Contains(x)))
             {
@@ -838,12 +888,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 {
                     var arr = new JsonArray();
                     foreach (var item in seq.Cast<object>())
-                        arr.Add(SimpleObjectToJson(item));
+                        arr.Add(SimpleObjectToJson(item, useCamelCase));
                     o[relApi] = arr;
                 }
                 else
                 {
-                    o[relApi] = SimpleObjectToJson(nav);
+                    o[relApi] = SimpleObjectToJson(nav, useCamelCase);
                 }
             }
         }
@@ -851,7 +901,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         return o;
     }
 
-    private static JsonObject SimpleObjectToJson(object obj)
+    private static JsonObject SimpleObjectToJson(object obj, bool useCamelCase)
     {
         var j = new JsonObject();
         var t = obj.GetType();
@@ -870,33 +920,65 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
             if (!isScalar) continue;
 
-            j[char.ToLowerInvariant(p.Name[0]) + p.Name[1..]] = JsonValue.Create(p.GetValue(obj));
+            var key = useCamelCase
+                ? char.ToLowerInvariant(p.Name[0]) + p.Name[1..]
+                : p.Name;
+            j[key] = JsonValue.Create(p.GetValue(obj));
         }
         return j;
     }
 
     private static object? EvaluateComputedExpression(object entity, string expression)
     {
-        // Simple expression evaluator supporting property concatenation
-        // Format: "PropertyA + ' ' + PropertyB" or just "PropertyA"
+        // Simple expression evaluator supporting property concatenation and numeric summation
+        // Format: "PropertyA + ' ' + PropertyB" or "Salary + Bonus"
         try
         {
             var entityType = entity.GetType();
             var parts = expression.Split(new[] { " + " }, StringSplitOptions.None);
-            var result = new System.Text.StringBuilder();
 
+            // Determine if all non-literal parts are numeric properties
+            var allNumeric = true;
             foreach (var part in parts)
             {
                 var trimmed = part.Trim();
+                if (trimmed.StartsWith("'") && trimmed.EndsWith("'")) { allNumeric = false; break; }
+                var prop = entityType.GetProperty(trimmed);
+                if (prop is null) continue;
+                var pt = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+                if (pt != typeof(int) && pt != typeof(long) && pt != typeof(decimal)
+                    && pt != typeof(double) && pt != typeof(float))
+                {
+                    allNumeric = false;
+                    break;
+                }
+            }
 
-                // String literal (single quotes)
+            if (allNumeric && parts.Length > 0)
+            {
+                // Numeric summation
+                decimal sum = 0;
+                foreach (var part in parts)
+                {
+                    var prop = entityType.GetProperty(part.Trim());
+                    if (prop is null) continue;
+                    var val = prop.GetValue(entity);
+                    if (val is not null)
+                        sum += Convert.ToDecimal(val, System.Globalization.CultureInfo.InvariantCulture);
+                }
+                return sum;
+            }
+
+            // String concatenation
+            var result = new System.Text.StringBuilder();
+            foreach (var part in parts)
+            {
+                var trimmed = part.Trim();
                 if (trimmed.StartsWith("'") && trimmed.EndsWith("'"))
                 {
                     result.Append(trimmed[1..^1]);
                     continue;
                 }
-
-                // Property reference
                 var prop = entityType.GetProperty(trimmed);
                 if (prop is not null)
                 {
@@ -904,7 +986,6 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                     result.Append(val?.ToString() ?? "");
                 }
             }
-
             return result.ToString();
         }
         catch
@@ -964,12 +1045,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             }
         }
 
-        // immutable on update
+        // immutable on update (skip concurrency field — it's validated separately)
         if (op == CrudOperation.Update)
         {
+            var concurrencyApiName = oc.Concurrency?.FieldApiName;
             foreach (var imm in oc.ImmutableFields)
             {
-                if (body.ContainsKey(imm))
+                if (body.ContainsKey(imm)
+                    && !string.Equals(imm, concurrencyApiName, StringComparison.OrdinalIgnoreCase))
                     errors[imm] = new[] { "Field is immutable." };
             }
 
@@ -982,80 +1065,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         // Field-level validation (MinLength, MaxLength, Min, Max, Regex, AllowedValues)
-        foreach (var kv in body)
-        {
-            var field = c.Fields.FirstOrDefault(f => f.ApiName.Equals(kv.Key, StringComparison.OrdinalIgnoreCase));
-            if (field is null || field.Hidden) continue;
-
-            var val = field.Validation;
-            var node = kv.Value;
-            var fieldErrors = new List<string>();
-
-            // String validations
-            if (node is not null && field.Type == Core.Enums.FieldType.String)
-            {
-                var strVal = node.GetValue<string?>();
-                if (strVal is not null)
-                {
-                    if (val.MinLength.HasValue && strVal.Length < val.MinLength.Value)
-                        fieldErrors.Add($"Minimum length is {val.MinLength.Value}.");
-
-                    if (val.MaxLength.HasValue && strVal.Length > val.MaxLength.Value)
-                        fieldErrors.Add($"Maximum length is {val.MaxLength.Value}.");
-
-                    if (!string.IsNullOrEmpty(val.Regex))
-                    {
-                        try
-                        {
-                            if (!System.Text.RegularExpressions.Regex.IsMatch(strVal, val.Regex))
-                                fieldErrors.Add($"Value does not match required pattern.");
-                        }
-                        catch (ArgumentException)
-                        {
-                            // Invalid regex pattern in contract configuration - treat as validation error
-                            fieldErrors.Add($"Field has invalid validation pattern configured. Contact administrator.");
-                        }
-                    }
-
-                    if (val.AllowedValues is { Count: > 0 })
-                    {
-                        if (!val.AllowedValues.Contains(strVal, StringComparer.OrdinalIgnoreCase))
-                            fieldErrors.Add($"Value must be one of: {string.Join(", ", val.AllowedValues)}.");
-                    }
-                }
-            }
-
-            // Numeric validations (decimal covers int, long, etc.)
-            if (node is not null && IsNumericFieldType(field.Type))
-            {
-                try
-                {
-                    var numVal = node.GetValue<decimal>();
-
-                    if (val.Min.HasValue && numVal < val.Min.Value)
-                        fieldErrors.Add($"Minimum value is {val.Min.Value}.");
-
-                    if (val.Max.HasValue && numVal > val.Max.Value)
-                        fieldErrors.Add($"Maximum value is {val.Max.Value}.");
-                }
-                catch (FormatException)
-                {
-                    fieldErrors.Add($"Value must be a valid number.");
-                }
-                catch (InvalidOperationException)
-                {
-                    fieldErrors.Add($"Value must be a valid number.");
-                }
-            }
-
-            if (fieldErrors.Count > 0)
-                errors[kv.Key] = fieldErrors.ToArray();
-        }
+        Validation.FieldValidator.ValidateFieldConstraints(c, body, errors);
 
         if (errors.Count > 0)
             throw new CrudRequestValidationException(errors);
     }
-
-    private static bool IsNumericFieldType(Core.Enums.FieldType type)
-        => type is Core.Enums.FieldType.Int32 or Core.Enums.FieldType.Int64 or Core.Enums.FieldType.Decimal;
 }

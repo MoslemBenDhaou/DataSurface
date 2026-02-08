@@ -24,5 +24,6 @@ public sealed record EntityDef(
     bool EnableDelete,
     IReadOnlyList<PropertyDef> Properties,
     IReadOnlyList<RelationDef> Relations,
-    IReadOnlyDictionary<CrudOperation, string?>? Policies = null
+    IReadOnlyDictionary<CrudOperation, string?>? Policies = null,
+    TenantContract? Tenant = null
 );

@@ -30,10 +30,12 @@ public static class DataSurfaceEndpointMapper
 
         var group = app.MapGroup(options.ApiPrefix);
 
+        // Schema endpoint is always available alongside CRUD endpoints
+        DataSurfaceSchemaEndpoint.MapSchema(group);
+
         if (options.MapResourceDiscoveryEndpoint)
         {
             DataSurfaceResourceDiscovery.MapDiscovery(group);
-            DataSurfaceSchemaEndpoint.MapSchema(group);
         }
 
         if (options.MapStaticResources)
@@ -439,7 +441,7 @@ public static class DataSurfaceEndpointMapper
             res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
         }
 
-        return Results.Ok();
+        return Results.StatusCode(200);
     }
 
     private static async Task<IResult> HandleGet(ResourceContract c, string id, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
@@ -451,6 +453,17 @@ public static class DataSurfaceEndpointMapper
 
         var obj = await crud.GetAsync(c.ResourceKey, keyObj, expand, ct);
         if (obj is null) return Results.NotFound();
+
+        // Apply field projection if ?fields= is specified
+        if (req.Query.TryGetValue("fields", out var fieldsParam) && !string.IsNullOrWhiteSpace(fieldsParam))
+        {
+            var requested = new HashSet<string>(
+                fieldsParam.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase);
+            var keysToRemove = obj.Select(kv => kv.Key).Where(k => !requested.Contains(k)).ToList();
+            foreach (var key in keysToRemove)
+                obj.Remove(key);
+        }
 
         // Set ETag and check for conditional GET (304 Not Modified)
         var etag = DataSurfaceHttpEtags.TrySetEtag(res, c, obj, opt.EnableEtags);
@@ -543,8 +556,6 @@ public static class DataSurfaceEndpointMapper
         var spec = DataSurfaceQueryParser.ParseQuerySpec(req, c);
         var expand = DataSurfaceQueryParser.ParseExpand(req, c);
 
-        res.Headers.ContentType = "application/x-ndjson";
-        
         return Results.Stream(async stream =>
         {
             var writer = new System.IO.StreamWriter(stream);
@@ -594,15 +605,22 @@ public static class DataSurfaceEndpointMapper
             ? "csv"
             : "json";
 
-        // Export all records (with pagination limits)
+        // Export all records by paginating through the entire dataset
         var spec = DataSurfaceQueryParser.ParseQuerySpec(req, c);
-        spec = spec with { PageSize = c.Query.MaxPageSize };
-
-        var result = await crud.ListAsync(c.ResourceKey, spec, expand: null, ct);
+        var allItems = new List<System.Text.Json.Nodes.JsonObject>();
+        var page = 1;
+        int total;
+        do
+        {
+            var batchSpec = spec with { Page = page, PageSize = c.Query.MaxPageSize };
+            var result = await crud.ListAsync(c.ResourceKey, batchSpec, expand: null, ct);
+            allItems.AddRange(result.Items);
+            total = result.Total;
+            page++;
+        } while (allItems.Count < total);
 
         if (format == "csv")
         {
-            res.Headers.ContentType = "text/csv";
             res.Headers.ContentDisposition = $"attachment; filename=\"{c.ResourceKey}_export.csv\"";
 
             var fields = c.Fields.Where(field => field.InRead && !field.Hidden).ToList();
@@ -612,7 +630,7 @@ public static class DataSurfaceEndpointMapper
             csv.AppendLine(string.Join(",", fields.Select(field => $"\"{field.ApiName}\"")));
 
             // Data rows
-            foreach (var item in result.Items)
+            foreach (var item in allItems)
             {
                 var values = fields.Select(field =>
                 {
@@ -629,9 +647,8 @@ public static class DataSurfaceEndpointMapper
             return Results.Text(csv.ToString(), "text/csv");
         }
 
-        res.Headers.ContentType = "application/json";
         res.Headers.ContentDisposition = $"attachment; filename=\"{c.ResourceKey}_export.json\"";
-        return Results.Ok(result.Items);
+        return Results.Ok(allItems);
     }
 
     private static async Task<IResult> HandleImport(ResourceContract c, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
@@ -649,6 +666,10 @@ public static class DataSurfaceEndpointMapper
         var successCount = 0;
         var failureCount = 0;
         var errors = new List<object>();
+
+        // Wrap import in a transaction for atomicity
+        var db = sp.GetRequiredService<Microsoft.EntityFrameworkCore.DbContext>();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
 
         var rowNum = 0;
         foreach (var item in items)
@@ -672,6 +693,12 @@ public static class DataSurfaceEndpointMapper
                 errors.Add(new { row = rowNum, error = ex.Message });
             }
         }
+
+        // Commit only if all records succeeded; rollback on any failure
+        if (failureCount == 0)
+            await transaction.CommitAsync(ct);
+        else
+            await transaction.RollbackAsync(ct);
 
         return Results.Ok(new
         {
@@ -699,6 +726,6 @@ public static class DataSurfaceEndpointMapper
     private static string GetKeyApiName(ResourceContract c)
     {
         var keyField = c.Fields.FirstOrDefault(f => f.Name.Equals(c.Key.Name, StringComparison.OrdinalIgnoreCase));
-        return keyField?.ApiName ?? char.ToLowerInvariant(c.Key.Name[0]) + c.Key.Name[1..];
+        return keyField?.ApiName ?? c.Key.Name;
     }
 }

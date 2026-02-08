@@ -119,7 +119,8 @@ public sealed class DynamicContractBuilder
             Fields: fields,
             Relations: relations,
             Operations: ops,
-            Security: new SecurityContract(policies)
+            Security: new SecurityContract(policies),
+            Tenant: def.Tenant
         );
     }
 }

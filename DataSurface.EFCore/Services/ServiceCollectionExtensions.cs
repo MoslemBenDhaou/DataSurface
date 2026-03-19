@@ -34,6 +34,10 @@ public static class ServiceCollectionExtensions
         configure(opt);
 
         services.AddSingleton(opt);
+
+        // Propagate UseCamelCaseApiNames from EfCore options to the ContractBuilder options
+        opt.ContractBuilderOptions.UseCamelCaseApiNames = opt.UseCamelCaseApiNames;
+
         services.AddSingleton(new ContractBuilder(opt.ContractBuilderOptions));
 
         services.AddSingleton<IResourceContractProvider>(sp =>

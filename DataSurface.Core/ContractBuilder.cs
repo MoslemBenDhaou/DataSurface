@@ -69,22 +69,20 @@ public sealed class ContractBuilder
         var (keyName, keyType) = DiscoverKey(clrType, ra.KeyProperty);
         var key = new ResourceKeyContract(keyName, keyType);
 
-        // security policies: default naming; can be overridden by [CrudAuthorize]
-        var policies = new Dictionary<CrudOperation, string?>()
-        {
-            [CrudOperation.List]   = $"{ra.Route}.read",
-            [CrudOperation.Get]    = $"{ra.Route}.read",
-            [CrudOperation.Create] = $"{ra.Route}.create",
-            [CrudOperation.Update] = $"{ra.Route}.update",
-            [CrudOperation.Delete] = $"{ra.Route}.delete",
-        };
+        // security policies: opt-in via [CrudAuthorize] attribute
+        // By default, no authorization is required - policies are only set when explicitly configured
+        var policies = new Dictionary<CrudOperation, string?>();
 
         foreach (var auth in clrType.GetCustomAttributes<CrudAuthorizeAttribute>())
         {
             if (auth.Operation is null)
             {
-                foreach (var op in policies.Keys.ToArray())
-                    policies[op] = auth.Policy;
+                // Apply to all operations
+                policies[CrudOperation.List] = auth.Policy;
+                policies[CrudOperation.Get] = auth.Policy;
+                policies[CrudOperation.Create] = auth.Policy;
+                policies[CrudOperation.Update] = auth.Policy;
+                policies[CrudOperation.Delete] = auth.Policy;
             }
             else
             {
@@ -369,10 +367,10 @@ public sealed class ContractBuilder
     private static (bool inRead, bool inCreate, bool inUpdate, bool filterable, bool sortable) DefaultScalarMembership()
         => (inRead: true, inCreate: false, inUpdate: false, filterable: false, sortable: false);
 
-    private static string ToApiName(string clrName)
+    private string ToApiName(string clrName)
     {
-        // simple camelCase
         if (string.IsNullOrEmpty(clrName)) return clrName;
+        if (!_opt.UseCamelCaseApiNames) return clrName;
         return char.ToLowerInvariant(clrName[0]) + clrName[1..];
     }
 
@@ -411,6 +409,7 @@ public sealed class ContractBuilder
             || t == typeof(Guid)
             || t == typeof(double) || t == typeof(float)
             || t == typeof(byte[]) // treat as scalar
+            || t == typeof(string[]) || t == typeof(int[]) || t == typeof(Guid[]) || t == typeof(decimal[])
             ;
     }
 
@@ -427,6 +426,8 @@ public sealed class ContractBuilder
         if (t == typeof(bool)) return (FieldType.Boolean, nullable);
         if (t == typeof(DateTime)) return (FieldType.DateTime, nullable);
         if (t == typeof(Guid)) return (FieldType.Guid, nullable);
+        if (t == typeof(double)) return (FieldType.Decimal, nullable);
+        if (t == typeof(float)) return (FieldType.Decimal, nullable);
 
         if (t.IsEnum) return (FieldType.Enum, nullable);
 

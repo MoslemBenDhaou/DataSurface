@@ -16,6 +16,7 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
 {
     private readonly IDistributedCache _cache;
     private readonly DataSurfaceCacheOptions _options;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentBag<string>> _keyRegistry = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Creates a new distributed cache instance.
@@ -61,6 +62,10 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
         {
             AbsoluteExpirationRelativeToNow = expiry
         }, ct);
+
+        // Track the key for invalidation
+        var bag = _keyRegistry.GetOrAdd(resourceKey, _ => new System.Collections.Concurrent.ConcurrentBag<string>());
+        bag.Add(key);
     }
 
     /// <inheritdoc />
@@ -101,14 +106,11 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
     /// <inheritdoc />
     public async Task InvalidateResourceAsync(string resourceKey, CancellationToken ct = default)
     {
-        // Note: IDistributedCache doesn't support pattern-based deletion
-        // For full support, use Redis with SCAN or implement a key registry
-        // This is a best-effort implementation that clears known keys
-        var prefix = $"{_options.CacheKeyPrefix}{resourceKey}:";
-        
-        // In a real implementation, you would track keys or use Redis SCAN
-        // For now, we rely on TTL expiration
-        await Task.CompletedTask;
+        if (_keyRegistry.TryRemove(resourceKey, out var keys))
+        {
+            foreach (var key in keys)
+                await _cache.RemoveAsync(key, ct);
+        }
     }
 
     /// <inheritdoc />
@@ -134,6 +136,12 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
                 sb.Append($"f{field}:{value}");
             }
         }
+
+        if (!string.IsNullOrEmpty(spec.Search))
+            sb.Append($"q{spec.Search}");
+
+        if (!string.IsNullOrEmpty(spec.Fields))
+            sb.Append($"fl{spec.Fields}");
 
         if (expand?.Expand?.Any() == true)
             sb.Append($"e{string.Join(",", expand.Expand.OrderBy(x => x))}");

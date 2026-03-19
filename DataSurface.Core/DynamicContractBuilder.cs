@@ -19,14 +19,8 @@ public sealed class DynamicContractBuilder
     {
         var key = new ResourceKeyContract(def.KeyName, def.KeyType);
 
-        var policies = def.Policies ?? new Dictionary<CrudOperation, string?>()
-        {
-            [CrudOperation.List]   = $"{def.Route}.read",
-            [CrudOperation.Get]    = $"{def.Route}.read",
-            [CrudOperation.Create] = $"{def.Route}.create",
-            [CrudOperation.Update] = $"{def.Route}.update",
-            [CrudOperation.Delete] = $"{def.Route}.delete",
-        };
+        // Authorization is opt-in: only apply policies if explicitly configured
+        var policies = def.Policies ?? new Dictionary<CrudOperation, string?>();
 
         ConcurrencyContract? concurrency = null;
 
@@ -125,7 +119,8 @@ public sealed class DynamicContractBuilder
             Fields: fields,
             Relations: relations,
             Operations: ops,
-            Security: new SecurityContract(policies)
+            Security: new SecurityContract(policies),
+            Tenant: def.Tenant
         );
     }
 }

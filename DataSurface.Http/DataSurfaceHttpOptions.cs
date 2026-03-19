@@ -20,7 +20,7 @@ public sealed class DataSurfaceHttpOptions
     /// <summary>
     /// Gets or sets whether to map dynamic resources through catch-all routes.
     /// </summary>
-    public bool MapDynamicCatchAll { get; set; } = true;
+    public bool MapDynamicCatchAll { get; set; } = false;
 
     // Prefix for dynamic routes
     /// <summary>
@@ -32,7 +32,7 @@ public sealed class DataSurfaceHttpOptions
     /// <summary>
     /// Gets or sets whether to map the resource discovery endpoint.
     /// </summary>
-    public bool MapResourceDiscoveryEndpoint { get; set; } = true;
+    public bool MapResourceDiscoveryEndpoint { get; set; } = false;
 
     // Security
     /// <summary>
@@ -50,7 +50,7 @@ public sealed class DataSurfaceHttpOptions
     /// <summary>
     /// Gets or sets whether to enable ETag and If-Match handling for row-version concurrency.
     /// </summary>
-    public bool EnableEtags { get; set; } = true;
+    public bool EnableEtags { get; set; } = false;
 
     // Strict: if true, fail fast on route collisions
     /// <summary>
@@ -62,13 +62,13 @@ public sealed class DataSurfaceHttpOptions
     /// <summary>
     /// Gets or sets whether to map bulk operation endpoints (POST /api/{resource}/bulk).
     /// </summary>
-    public bool EnableBulkOperations { get; set; } = true;
+    public bool EnableBulkOperations { get; set; } = false;
 
     // Streaming
     /// <summary>
     /// Gets or sets whether to map streaming endpoints (GET /api/{resource}/stream).
     /// </summary>
-    public bool EnableStreaming { get; set; } = true;
+    public bool EnableStreaming { get; set; } = false;
 
     // Response caching
     /// <summary>
@@ -80,7 +80,7 @@ public sealed class DataSurfaceHttpOptions
     /// <summary>
     /// Gets or sets whether to support If-None-Match headers for 304 responses on GET requests.
     /// </summary>
-    public bool EnableConditionalGet { get; set; } = true;
+    public bool EnableConditionalGet { get; set; } = false;
 
     /// <summary>
     /// Gets or sets whether to enable PUT endpoints for full replacement updates (alongside PATCH).

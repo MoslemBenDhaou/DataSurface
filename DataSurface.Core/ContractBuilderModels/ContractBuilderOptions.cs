@@ -27,6 +27,12 @@ public sealed class ContractBuilderOptions
     public bool DefaultIncludeScalarsInRead { get; set; } = false;
 
     /// <summary>
+    /// When <see langword="true"/>, API names are generated in camelCase from CLR property names.
+    /// When <see langword="false"/>, CLR property names are used as-is (PascalCase).
+    /// </summary>
+    public bool UseCamelCaseApiNames { get; set; } = true;
+
+    /// <summary>
     /// API route prefix (for example <c>"api"</c>), used by higher layers when generating endpoints.
     /// </summary>
     public string ApiPrefix { get; set; } = "api"; // used later; kept here for consistency

@@ -1801,11 +1801,16 @@ Excludes a property from contract generation (use for EF navigation properties y
 builder.Services.AddDataSurfaceEfCore(opt =>
 {
     opt.AssembliesToScan = [typeof(Program).Assembly];
+    
+    // All conventions are opt-in (disabled by default)
     opt.AutoRegisterCrudEntities = true;    // Auto-register in DbContext
     opt.EnableSoftDeleteFilter = true;      // Apply IsDeleted filter
     opt.EnableRowVersionConvention = true;  // Configure RowVersion columns
     opt.EnableTimestampConvention = true;   // Auto-populate CreatedAt/UpdatedAt
-    opt.UseCamelCaseApiNames = true;        // camelCase API names
+    opt.UseCamelCaseApiNames = true;        // camelCase API names (default: true)
+    
+    // Use a feature preset or customize individual features
+    opt.Features = DataSurfaceFeatures.Standard;  // Default is Minimal
     
     opt.ContractBuilderOptions.ExposeFieldsOnlyWhenAnnotated = true;
 });
@@ -1816,22 +1821,29 @@ builder.Services.AddDataSurfaceEfCore(opt =>
 ```csharp
 app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 {
-    ApiPrefix = "/api",                     // Route prefix
-    MapStaticResources = true,              // Map static entity routes
-    MapDynamicCatchAll = true,              // Map /api/d/{route}
+    ApiPrefix = "/api",                     // Route prefix (default)
+    MapStaticResources = true,              // Map static entity routes (default: true)
+    
+    // All advanced features are opt-in (disabled by default)
+    MapDynamicCatchAll = true,              // Map /api/d/{route} (default: false)
     DynamicPrefix = "/d",                   // Dynamic route prefix
-    MapResourceDiscoveryEndpoint = true,    // GET /api/$resources
+    MapResourceDiscoveryEndpoint = true,    // GET /api/$resources (default: false)
+    EnableEtags = true,                     // ETag response headers (default: false)
+    EnableBulkOperations = true,            // Bulk endpoints (default: false)
+    EnableStreaming = true,                 // Streaming endpoints (default: false)
+    EnableConditionalGet = true,            // If-None-Match/304 (default: false)
+    EnablePutForFullUpdate = true,          // PUT for full replacement (default: false)
+    EnableImportExport = true,              // Import/export endpoints (default: false)
+    
+    // Security & infrastructure (opt-in)
     RequireAuthorizationByDefault = false,  // Require auth on all endpoints
     DefaultPolicy = null,                   // Default auth policy
-    EnableEtags = true,                     // ETag response headers
-    ThrowOnRouteCollision = false,          // Fail on duplicate routes
-    EnablePutForFullUpdate = false,         // Enable PUT for full replacement
-    EnableImportExport = false,             // Enable import/export endpoints
     EnableRateLimiting = false,             // Enable rate limiting
     RateLimitingPolicy = null,              // Rate limiting policy name
     EnableApiKeyAuth = false,               // Enable API key authentication
     ApiKeyHeaderName = "X-Api-Key",         // API key header name
-    EnableWebhooks = false                  // Enable webhook publishing
+    EnableWebhooks = false,                 // Enable webhook publishing
+    ThrowOnRouteCollision = false           // Fail on duplicate routes
 });
 ```
 
@@ -1851,28 +1863,31 @@ builder.Services.AddDataSurfaceDynamic(opt =>
 app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 {
     Prefix = "/admin/ds",                   // Route prefix
-    RequireAuthorization = true,            // Require auth
-    Policy = "DataSurfaceAdmin"             // Auth policy name
+    RequireAuthorization = true,            // Require auth (default: true for security)
+    Policy = null                           // Auth policy (default: uses default policy)
 });
 ```
 
 ### Feature Flags
 
-Selectively enable or disable DataSurface features using `DataSurfaceFeatures`. This allows you to use only the features you need, reducing complexity and overhead:
+DataSurface follows an **opt-in philosophy** — advanced features are disabled by default for security and simplicity. Use `DataSurfaceFeatures` presets or configure individual features:
 
 ```csharp
 builder.Services.AddDataSurfaceEfCore(opt =>
 {
-    // Use a preset
-    opt.Features = DataSurfaceFeatures.Minimal;   // Core CRUD only
-    opt.Features = DataSurfaceFeatures.Standard;  // Default - security & observability
+    // Use a preset (Minimal is the default)
+    opt.Features = DataSurfaceFeatures.Minimal;   // Core CRUD only (default)
+    opt.Features = DataSurfaceFeatures.Standard;  // Core + security + observability
     opt.Features = DataSurfaceFeatures.Full;      // All features including webhooks
     
-    // Or customize individual features
+    // Or customize individual features (starting from Minimal defaults)
     opt.Features = new DataSurfaceFeatures
     {
+        // Core (enabled by default)
         EnableFieldValidation = true,
         EnableDefaultValues = true,
+        
+        // Advanced features (opt-in)
         EnableComputedFields = true,
         EnableFieldProjection = true,
         EnableTenantIsolation = true,
@@ -1880,12 +1895,12 @@ builder.Services.AddDataSurfaceEfCore(opt =>
         EnableResourceAuthorization = true,
         EnableFieldAuthorization = true,
         EnableAuditLogging = true,
-        EnableMetrics = false,          // Disable metrics
-        EnableTracing = false,          // Disable tracing
+        EnableMetrics = true,
+        EnableTracing = true,
         EnableQueryCaching = true,
         EnableHooks = true,
         EnableOverrides = true,
-        EnableWebhooks = false          // Disable webhooks
+        EnableWebhooks = true
     };
 });
 ```
@@ -1896,26 +1911,26 @@ builder.Services.AddDataSurfaceEfCore(opt =>
 |----------|---------|---------|-------------|
 | **Core CRUD** | `EnableFieldValidation` | ✅ | MinLength, MaxLength, Min, Max, Regex, AllowedValues |
 | | `EnableDefaultValues` | ✅ | Apply default values on create |
-| | `EnableComputedFields` | ✅ | Evaluate computed expressions at read time |
-| | `EnableFieldProjection` | ✅ | Support `?fields=` query parameter |
-| **Security** | `EnableTenantIsolation` | ✅ | `[CrudTenant]` attribute support |
-| | `EnableRowLevelSecurity` | ✅ | `IResourceFilter<T>` support |
-| | `EnableResourceAuthorization` | ✅ | `IResourceAuthorizer<T>` support |
-| | `EnableFieldAuthorization` | ✅ | `IFieldAuthorizer` support |
-| **Observability** | `EnableAuditLogging` | ✅ | `IAuditLogger` integration |
-| | `EnableMetrics` | ✅ | OpenTelemetry metrics |
-| | `EnableTracing` | ✅ | Distributed tracing |
-| **Caching** | `EnableQueryCaching` | ✅ | `IQueryResultCache` integration |
-| **Extensibility** | `EnableHooks` | ✅ | Lifecycle hooks |
-| | `EnableOverrides` | ✅ | CRUD operation overrides |
-| **Integration** | `EnableWebhooks` | ❌ | Webhook publishing (opt-in) |
+| | `EnableComputedFields` | ❌ | Evaluate computed expressions at read time |
+| | `EnableFieldProjection` | ❌ | Support `?fields=` query parameter |
+| **Security** | `EnableTenantIsolation` | ❌ | `[CrudTenant]` attribute support |
+| | `EnableRowLevelSecurity` | ❌ | `IResourceFilter<T>` support |
+| | `EnableResourceAuthorization` | ❌ | `IResourceAuthorizer<T>` support |
+| | `EnableFieldAuthorization` | ❌ | `IFieldAuthorizer` support |
+| **Observability** | `EnableAuditLogging` | ❌ | `IAuditLogger` integration |
+| | `EnableMetrics` | ❌ | OpenTelemetry metrics |
+| | `EnableTracing` | ❌ | Distributed tracing |
+| **Caching** | `EnableQueryCaching` | ❌ | `IQueryResultCache` integration |
+| **Extensibility** | `EnableHooks` | ❌ | Lifecycle hooks |
+| | `EnableOverrides` | ❌ | CRUD operation overrides |
+| **Integration** | `EnableWebhooks` | ❌ | Webhook publishing |
 
 **Presets:**
 
 | Preset | Description | Use Case |
 |--------|-------------|----------|
-| `Minimal` | Core CRUD + validation only | Simple APIs, microservices, maximum performance |
-| `Standard` | Core + security + observability | Most production applications (default) |
+| `Minimal` | Core CRUD + validation only | Simple APIs, microservices, maximum performance **(default)** |
+| `Standard` | Core + security + observability | Most production applications |
 | `Full` | All features enabled | Feature-rich applications with webhooks |
 
 ## Architecture

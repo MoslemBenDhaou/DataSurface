@@ -149,8 +149,13 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                 }
             }
 
-            if (transaction is not null && errors.Count == 0)
-                await transaction.CommitAsync(ct);
+            if (transaction is not null)
+            {
+                if (errors.Count == 0)
+                    await transaction.CommitAsync(ct);
+                else
+                    await transaction.RollbackAsync(ct);
+            }
         }
         catch (Exception ex)
         {

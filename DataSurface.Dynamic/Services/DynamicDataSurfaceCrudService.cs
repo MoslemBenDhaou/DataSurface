@@ -119,10 +119,13 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             .Take(pageSize)
             .ToListAsync(ct);
 
+        // Parse field projection
+        string? projectedFields = spec.Fields;
+
         var items = new List<JsonObject>(rows.Count);
         foreach (var row in rows)
         {
-            var obj = ProjectRowToJson(row, c);
+            var obj = ProjectRowToJson(row, c, projectedFields);
             if (expand is not null) await ApplyExpandAsync(obj, row, c, expand, ct);
             // JSON read hook
             await _resourceHooks.AfterReadAsync(c.ResourceKey, row.Id, obj, hookCtx);
@@ -404,7 +407,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     private static string GetKeyApiName(ResourceContract c)
     {
         var keyField = c.Fields.FirstOrDefault(f => f.Name.Equals(c.Key.Name, StringComparison.OrdinalIgnoreCase));
-        return keyField?.ApiName ?? char.ToLowerInvariant(c.Key.Name[0]) + c.Key.Name[1..];
+        return keyField?.ApiName ?? c.Key.Name;
     }
 
     private string ResolveOrGenerateId(ResourceContract c, JsonObject body)
@@ -424,16 +427,27 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         });
     }
 
-    private static JsonObject ProjectRowToJson(DsDynamicRecordRow row, ResourceContract contract)
+    private static JsonObject ProjectRowToJson(DsDynamicRecordRow row, ResourceContract contract, string? projectedFields = null)
     {
         var obj = JsonNode.Parse(row.DataJson)?.AsObject() ?? new JsonObject();
-        return ProjectJsonToReadShape(contract, obj);
+        return ProjectJsonToReadShape(contract, obj, projectedFields);
     }
 
-    private static JsonObject ProjectJsonToReadShape(ResourceContract c, JsonObject json)
+    private static JsonObject ProjectJsonToReadShape(ResourceContract c, JsonObject json, string? projectedFields = null)
     {
         var o = new JsonObject();
-        foreach (var f in c.Fields.Where(f => f.InRead && !f.Hidden))
+        var readFields = c.Fields.Where(f => f.InRead && !f.Hidden);
+
+        // Apply field projection if specified
+        if (!string.IsNullOrWhiteSpace(projectedFields))
+        {
+            var requested = new HashSet<string>(
+                projectedFields.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase);
+            readFields = readFields.Where(f => requested.Contains(f.ApiName));
+        }
+
+        foreach (var f in readFields)
         {
             if (json.TryGetPropertyValue(f.ApiName, out var v))
                 o[f.ApiName] = v?.DeepClone();
@@ -638,51 +652,67 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var parts = spec.Sort!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (parts.Length == 0) return query.OrderByDescending(r => r.UpdatedAt);
 
-        IQueryable<DsDynamicRecordRow>? result = null;
-
+        // Collect valid sort fields first
+        var sortFields = new List<(FieldContract field, string api, bool desc)>();
         foreach (var part in parts)
         {
             var desc = part.StartsWith("-");
             var api = desc ? part[1..] : part;
-
-            if (!c.Query.SortableFields.Contains(api, StringComparer.OrdinalIgnoreCase))
-                continue;
-
+            if (!c.Query.SortableFields.Contains(api, StringComparer.OrdinalIgnoreCase)) continue;
             var f = c.Fields.FirstOrDefault(x => x.ApiName.Equals(api, StringComparison.OrdinalIgnoreCase));
-            if (f is null) continue;
+            if (f is not null) sortFields.Add((f, api, desc));
+        }
 
-            var idx = _db.Set<DsDynamicIndexRow>().AsNoTracking()
-                .Where(i => i.EntityKey == c.ResourceKey && i.PropertyApiName == api);
+        if (sortFields.Count == 0) return query.OrderByDescending(r => r.UpdatedAt);
 
-            var sourceQuery = result ?? query;
+        // Use correlated subquery sorting with proper OrderBy/ThenBy chaining
+        // so that multiple sort fields produce a compound ORDER BY clause.
+        IOrderedQueryable<DsDynamicRecordRow>? ordered = null;
+        foreach (var (f, api, isDesc) in sortFields)
+        {
+            var ek = c.ResourceKey;
+            var pa = api;
+            var isFirst = ordered is null;
+            IQueryable<DsDynamicRecordRow> src = ordered ?? query;
 
-            // Left join records with index
-            var joined = from r in sourceQuery
-                         join i in idx on r.Id equals i.RecordId into gj
-                         from i in gj.DefaultIfEmpty()
-                         select new { r, i };
-
-            // order by typed (use ThenBy for subsequent sorts - simplified: rebuild ordering each time)
-            result = f.Type switch
+            ordered = f.Type switch
             {
                 FieldType.Int32 or FieldType.Int64 or FieldType.Decimal =>
-                    (desc ? joined.OrderByDescending(x => x.i!.ValueNumber) : joined.OrderBy(x => x.i!.ValueNumber)).Select(x => x.r),
-
+                    ApplySortField(src, r => _db.Set<DsDynamicIndexRow>()
+                        .Where(i => i.EntityKey == ek && i.RecordId == r.Id && i.PropertyApiName == pa)
+                        .Select(i => i.ValueNumber).FirstOrDefault(), isDesc, isFirst),
                 FieldType.DateTime =>
-                    (desc ? joined.OrderByDescending(x => x.i!.ValueDateTime) : joined.OrderBy(x => x.i!.ValueDateTime)).Select(x => x.r),
-
+                    ApplySortField(src, r => _db.Set<DsDynamicIndexRow>()
+                        .Where(i => i.EntityKey == ek && i.RecordId == r.Id && i.PropertyApiName == pa)
+                        .Select(i => i.ValueDateTime).FirstOrDefault(), isDesc, isFirst),
                 FieldType.Boolean =>
-                    (desc ? joined.OrderByDescending(x => x.i!.ValueBool) : joined.OrderBy(x => x.i!.ValueBool)).Select(x => x.r),
-
+                    ApplySortField(src, r => _db.Set<DsDynamicIndexRow>()
+                        .Where(i => i.EntityKey == ek && i.RecordId == r.Id && i.PropertyApiName == pa)
+                        .Select(i => i.ValueBool).FirstOrDefault(), isDesc, isFirst),
                 FieldType.Guid =>
-                    (desc ? joined.OrderByDescending(x => x.i!.ValueGuid) : joined.OrderBy(x => x.i!.ValueGuid)).Select(x => x.r),
-
+                    ApplySortField(src, r => _db.Set<DsDynamicIndexRow>()
+                        .Where(i => i.EntityKey == ek && i.RecordId == r.Id && i.PropertyApiName == pa)
+                        .Select(i => i.ValueGuid).FirstOrDefault(), isDesc, isFirst),
                 _ =>
-                    (desc ? joined.OrderByDescending(x => x.i!.ValueString) : joined.OrderBy(x => x.i!.ValueString)).Select(x => x.r)
+                    ApplySortField(src, r => _db.Set<DsDynamicIndexRow>()
+                        .Where(i => i.EntityKey == ek && i.RecordId == r.Id && i.PropertyApiName == pa)
+                        .Select(i => i.ValueString).FirstOrDefault(), isDesc, isFirst),
             };
         }
 
-        return result ?? query.OrderByDescending(r => r.UpdatedAt);
+        return ordered!;
+    }
+
+    private static IOrderedQueryable<DsDynamicRecordRow> ApplySortField<TKey>(
+        IQueryable<DsDynamicRecordRow> query,
+        System.Linq.Expressions.Expression<Func<DsDynamicRecordRow, TKey>> keySelector,
+        bool desc, bool first)
+    {
+        if (first)
+            return desc ? query.OrderByDescending(keySelector) : query.OrderBy(keySelector);
+        return desc
+            ? ((IOrderedQueryable<DsDynamicRecordRow>)query).ThenByDescending(keySelector)
+            : ((IOrderedQueryable<DsDynamicRecordRow>)query).ThenBy(keySelector);
     }
 
     private static (string op, string value) ParseOp(string raw)
@@ -751,7 +781,6 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
     private static void ValidateBody(ResourceContract c, CrudOperation op, JsonObject body)
     {
-        // Same semantics as your EfDataSurfaceCrudService.ValidateBody (copied intentionally)
         var errors = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         var oc = c.Operations[op];
 
@@ -774,9 +803,11 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         if (op == CrudOperation.Update)
         {
+            var concurrencyApiName = oc.Concurrency?.FieldApiName;
             foreach (var imm in oc.ImmutableFields)
             {
-                if (body.ContainsKey(imm))
+                if (body.ContainsKey(imm)
+                    && !string.Equals(imm, concurrencyApiName, StringComparison.OrdinalIgnoreCase))
                     errors[imm] = new[] { "Field is immutable." };
             }
 
@@ -786,6 +817,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
                     errors[cc.FieldApiName] = new[] { "Concurrency token is required." };
             }
         }
+
+        // Field-level validation (MinLength, MaxLength, Min, Max, Regex, AllowedValues)
+        DataSurface.EFCore.Validation.FieldValidator.ValidateFieldConstraints(c, body, errors);
 
         if (errors.Count > 0)
             throw new CrudRequestValidationException(errors);

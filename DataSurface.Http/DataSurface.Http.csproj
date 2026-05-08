@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -34,8 +34,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Http.Abstractions" Version="2.3.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Routing.Abstractions" Version="2.3.0" />
+    <!-- Microsoft.AspNetCore.Http.Abstractions and Routing.Abstractions are part
+         of the shared framework via FrameworkReference; explicit refs would be
+         pruned (NU1510) on .NET 8+. -->
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 

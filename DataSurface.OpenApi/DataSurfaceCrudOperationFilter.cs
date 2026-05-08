@@ -1,7 +1,7 @@
 using DataSurface.Core.Enums;
 using DataSurface.EFCore.Interfaces;
 using DataSurface.Http;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
 namespace DataSurface.OpenApi;
@@ -23,8 +23,6 @@ public sealed class DataSurfaceCrudOperationFilter : IOperationFilter
     /// <summary>
     /// Applies DataSurface-specific request/response schemas and query parameters to a Swagger operation.
     /// </summary>
-    /// <param name="operation">The operation to modify.</param>
-    /// <param name="context">The filter context.</param>
     public void Apply(OpenApiOperation operation, OperationFilterContext context)
     {
         var meta = context.ApiDescription.ActionDescriptor.EndpointMetadata
@@ -37,21 +35,15 @@ public sealed class DataSurfaceCrudOperationFilter : IOperationFilter
         {
             if (meta.Operation == CrudOperation.List)
             {
-                operation.Parameters ??= new List<OpenApiParameter>();
-
-                operation.Parameters.Add(new OpenApiParameter { Name = "page", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "integer" } });
-                operation.Parameters.Add(new OpenApiParameter { Name = "pageSize", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "integer" } });
-                operation.Parameters.Add(new OpenApiParameter { Name = "sort", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "string" } });
-                operation.Parameters.Add(new OpenApiParameter { Name = "expand", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "string" } });
-
+                AddListQueryParameters(operation);
                 operation.Description = (operation.Description ?? "")
                     + "\n\nFilters: use `filter[field]=op:value` (e.g. `filter[name]=contains:abc`).";
             }
 
             if (meta.Operation == CrudOperation.Get)
             {
-                operation.Parameters ??= new List<OpenApiParameter>();
-                operation.Parameters.Add(new OpenApiParameter { Name = "expand", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "string" } });
+                operation.Parameters ??= new List<IOpenApiParameter>();
+                operation.Parameters.Add(StringQueryParam("expand"));
             }
 
             return;
@@ -59,22 +51,13 @@ public sealed class DataSurfaceCrudOperationFilter : IOperationFilter
 
         var c = _contracts.GetByResourceKey(meta.ResourceKey);
 
-        // Describe common query params for list
         if (meta.Operation == CrudOperation.List)
         {
-            operation.Parameters ??= new List<OpenApiParameter>();
-
-            operation.Parameters.Add(new OpenApiParameter { Name = "page", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "integer" } });
-            operation.Parameters.Add(new OpenApiParameter { Name = "pageSize", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "integer" } });
-            operation.Parameters.Add(new OpenApiParameter { Name = "sort", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "string" } });
-            operation.Parameters.Add(new OpenApiParameter { Name = "expand", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = "string" } });
-
-            // Inform how filters work
+            AddListQueryParameters(operation);
             operation.Description = (operation.Description ?? "")
                 + "\n\nFilters: use `filter[field]=op:value` (e.g. `filter[name]=contains:abc`).";
         }
 
-        // Request/response schemas (override JsonObject)
         var readName = $"{c.ResourceKey}.Read";
         var createName = $"{c.ResourceKey}.Create";
         var updateName = $"{c.ResourceKey}.Update";
@@ -104,17 +87,16 @@ public sealed class DataSurfaceCrudOperationFilter : IOperationFilter
         }
         else if (meta.Operation == CrudOperation.List)
         {
-            // PagedResult<Read> as object schema
             var pageName = $"{c.ResourceKey}.Paged";
             EnsureSchema(context, pageName, new OpenApiSchema
             {
-                Type = "object",
-                Properties = new Dictionary<string, OpenApiSchema>
+                Type = JsonSchemaType.Object,
+                Properties = new Dictionary<string, IOpenApiSchema>
                 {
-                    ["items"] = new() { Type = "array", Items = Ref(readName) },
-                    ["page"] = new() { Type = "integer" },
-                    ["pageSize"] = new() { Type = "integer" },
-                    ["total"] = new() { Type = "integer" }
+                    ["items"] = new OpenApiSchema { Type = JsonSchemaType.Array, Items = Ref(readName) },
+                    ["page"] = new OpenApiSchema { Type = JsonSchemaType.Integer },
+                    ["pageSize"] = new OpenApiSchema { Type = JsonSchemaType.Integer },
+                    ["total"] = new OpenApiSchema { Type = JsonSchemaType.Integer }
                 },
                 AdditionalPropertiesAllowed = false
             });
@@ -124,17 +106,35 @@ public sealed class DataSurfaceCrudOperationFilter : IOperationFilter
         }
     }
 
+    private static void AddListQueryParameters(OpenApiOperation operation)
+    {
+        operation.Parameters ??= new List<IOpenApiParameter>();
+        operation.Parameters.Add(new OpenApiParameter { Name = "page", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = JsonSchemaType.Integer } });
+        operation.Parameters.Add(new OpenApiParameter { Name = "pageSize", In = ParameterLocation.Query, Schema = new OpenApiSchema { Type = JsonSchemaType.Integer } });
+        operation.Parameters.Add(StringQueryParam("sort"));
+        operation.Parameters.Add(StringQueryParam("expand"));
+    }
+
+    private static OpenApiParameter StringQueryParam(string name) => new()
+    {
+        Name = name,
+        In = ParameterLocation.Query,
+        Schema = new OpenApiSchema { Type = JsonSchemaType.String },
+    };
+
     private static void EnsureSchema(OperationFilterContext ctx, string name, OpenApiSchema schema)
     {
         if (!ctx.SchemaRepository.Schemas.ContainsKey(name))
             ctx.SchemaRepository.Schemas[name] = schema;
     }
 
-    private static OpenApiSchema Ref(string name)
-        => new() { Reference = new OpenApiReference { Type = ReferenceType.Schema, Id = name } };
+    // Microsoft.OpenApi v2 represents $ref via dedicated reference types
+    // (OpenApiSchemaReference for schema refs) rather than v1's untyped
+    // OpenApiReference attached to a plain OpenApiSchema.
+    private static IOpenApiSchema Ref(string name) => new OpenApiSchemaReference(name);
 
     private static bool TryGetJsonContent(
-        OpenApiResponses responses,
+        OpenApiResponses? responses,
         string statusCode,
         out OpenApiMediaType content)
     {

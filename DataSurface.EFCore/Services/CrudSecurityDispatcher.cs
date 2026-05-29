@@ -102,10 +102,22 @@ public sealed class CrudSecurityDispatcher
             return query;
         }
 
-        // Build filter expression: e => e.TenantField == tenantValue
+        // Build filter expression: e => e.TenantField == tenantValue.
+        // The claim value is a string; convert it to the property's CLR type so
+        // non-string tenant keys (Guid, int, enum, ...) work — not just strings.
         var param = Expression.Parameter(typeof(TEntity), "e");
         var prop = Expression.Property(param, contract.Tenant.FieldName);
-        var constant = Expression.Constant(tenantValue, prop.Type);
+        var underlying = Nullable.GetUnderlyingType(prop.Type) ?? prop.Type;
+        if (!TryConvertTenantValue(tenantValue, underlying, out var typedValue))
+        {
+            if (contract.Tenant.Required)
+                throw new UnauthorizedAccessException(
+                    $"Tenant claim '{contract.Tenant.ClaimType}' value '{tenantValue}' is not valid for type '{prop.Type.Name}'.");
+            return query;
+        }
+        Expression constant = Expression.Constant(typedValue, underlying);
+        if (underlying != prop.Type)
+            constant = Expression.Convert(constant, prop.Type);
         var eq = Expression.Equal(prop, constant);
         var lambda = Expression.Lambda<Func<TEntity, bool>>(eq, param);
 
@@ -154,8 +166,33 @@ public sealed class CrudSecurityDispatcher
         var prop = entity.GetType().GetProperty(contract.Tenant.FieldName);
         if (prop is not null && prop.CanWrite)
         {
-            var convertedValue = Convert.ChangeType(tenantValue, prop.PropertyType);
-            prop.SetValue(entity, convertedValue);
+            // Convert the string claim to the property's CLR type (Guid/int/enum/...).
+            var underlying = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+            if (TryConvertTenantValue(tenantValue, underlying, out var typedValue))
+                prop.SetValue(entity, typedValue);
+            else if (contract.Tenant.Required)
+                throw new UnauthorizedAccessException(
+                    $"Tenant claim '{contract.Tenant.ClaimType}' value '{tenantValue}' is not valid for type '{prop.PropertyType.Name}'.");
+        }
+    }
+
+    // Tenant claim values arrive as strings; convert to the tenant property's CLR
+    // type so Guid/int/enum keys are supported (Convert.ChangeType alone throws
+    // for Guid/enum). Returns false on an unparseable value.
+    private static bool TryConvertTenantValue(string raw, Type targetType, out object? value)
+    {
+        try
+        {
+            if (targetType == typeof(string)) { value = raw; return true; }
+            if (targetType == typeof(Guid)) { value = Guid.Parse(raw); return true; }
+            if (targetType.IsEnum) { value = Enum.Parse(targetType, raw, ignoreCase: true); return true; }
+            value = Convert.ChangeType(raw, targetType, System.Globalization.CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException or ArgumentException)
+        {
+            value = null;
+            return false;
         }
     }
 

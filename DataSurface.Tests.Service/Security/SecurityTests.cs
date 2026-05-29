@@ -120,6 +120,56 @@ public class SecurityTests : IDisposable
         ex.Which.InnerException.Should().BeOfType<UnauthorizedAccessException>();
     }
 
+    [Fact]
+    public void ApplyTenantFilter_WithGuidTenantKey_FiltersByTenant()
+    {
+        // Regression: the tenant filter previously built a string constant against
+        // the tenant property, throwing for non-string (Guid) keys.
+        var tenantA = Guid.NewGuid();
+        var tenantB = Guid.NewGuid();
+        var contract = BuildGuidTenantContract();
+        using var sp = new ServiceCollection()
+            .AddSingleton<ITenantResolver>(new FixedTenantResolver(tenantA.ToString()))
+            .BuildServiceProvider();
+        var dispatcher = new CrudSecurityDispatcher(sp);
+
+        var data = new[]
+        {
+            new GuidTenantRow { Id = 1, TenantId = tenantA, Name = "A" },
+            new GuidTenantRow { Id = 2, TenantId = tenantB, Name = "B" },
+        }.AsQueryable();
+
+        var filtered = dispatcher.ApplyTenantFilter(data, contract).ToList();
+
+        filtered.Should().ContainSingle().Which.Name.Should().Be("A");
+    }
+
+    [Fact]
+    public void SetTenantValue_WithGuidTenantKey_SetsTypedValue()
+    {
+        var tenant = Guid.NewGuid();
+        var contract = BuildGuidTenantContract();
+        using var sp = new ServiceCollection()
+            .AddSingleton<ITenantResolver>(new FixedTenantResolver(tenant.ToString()))
+            .BuildServiceProvider();
+        var dispatcher = new CrudSecurityDispatcher(sp);
+
+        var row = new GuidTenantRow { Id = 3, Name = "New" };
+        dispatcher.SetTenantValue(row, contract);
+
+        row.TenantId.Should().Be(tenant);
+    }
+
+    private static ResourceContract BuildGuidTenantContract()
+        => new ResourceContractBuilder("GuidTenantRow", "guid-tenant-rows")
+            .Key("Id", FieldType.Int32)
+            .Tenant("TenantId", "tenantId", "tenant_id", required: true)
+            .WithField(new FieldBuilder("Id").OfType(FieldType.Int32).InRead().Filterable().Build())
+            .WithField(new FieldBuilder("Name").OfType(FieldType.String).ReadCreateUpdate().Build())
+            .WithField(new FieldBuilder("TenantId").OfType(FieldType.String).InRead().Build())
+            .EnableAllOperations()
+            .Build();
+
     // ────────────────────────────────────────────
     //  Row-Level Security (IResourceFilter)
     // ────────────────────────────────────────────
@@ -343,6 +393,13 @@ public class SecurityTests : IDisposable
         private readonly string? _tenantId;
         public FixedTenantResolver(string? tenantId) => _tenantId = tenantId;
         public string? GetTenantId() => _tenantId;
+    }
+
+    private sealed class GuidTenantRow
+    {
+        public int Id { get; set; }
+        public Guid TenantId { get; set; }
+        public string Name { get; set; } = "";
     }
 
     private sealed class ActiveOnlyFilter : IResourceFilter<SimpleItem>

@@ -16,7 +16,6 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
 {
     private readonly IDistributedCache _cache;
     private readonly DataSurfaceCacheOptions _options;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentBag<string>> _keyRegistry = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Creates a new distributed cache instance.
@@ -36,12 +35,21 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
 
         var key = BuildKey(resourceKey, "list", cacheKey);
         var data = await _cache.GetStringAsync(key, ct);
-        
         if (data is null) return null;
 
         try
         {
-            return JsonSerializer.Deserialize<PagedResult<JsonObject>>(data);
+            var entry = JsonSerializer.Deserialize<CachedListEntry>(data);
+            if (entry?.Data is null) return null;
+
+            // The entry stamps the resource list-version it was written under. Read the current
+            // version AFTER fetching the entry and compare. If the version key is ABSENT (never
+            // set, or evicted) treat every entry as stale — entries are only ever written with a
+            // freshly-initialized random version, so nothing can match a missing namespace. This
+            // closes the eviction window (no "0"-default entry can be resurrected).
+            var version = await _cache.GetStringAsync(ListVersionKey(resourceKey), ct);
+            if (version is null) return null;
+            return entry.Version == version ? entry.Data : null;
         }
         catch
         {
@@ -50,22 +58,23 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
     }
 
     /// <inheritdoc />
-    public async Task SetListAsync(string resourceKey, string cacheKey, PagedResult<JsonObject> result, TimeSpan? duration = null, CancellationToken ct = default)
+    public async Task SetListAsync(string resourceKey, string cacheKey, PagedResult<JsonObject> result, TimeSpan? duration = null, string? observedVersion = null, CancellationToken ct = default)
     {
         if (!IsListCachingEnabled(resourceKey)) return;
 
+        var version = await GetOrInitListVersionAsync(resourceKey, ct);
+        // Stale-fill guard: if the caller observed a version before its DB read and it has since been
+        // bumped by a concurrent write, the result we're about to cache is already stale — skip it.
+        if (observedVersion is not null && observedVersion != version) return;
+
         var key = BuildKey(resourceKey, "list", cacheKey);
-        var data = JsonSerializer.Serialize(result);
+        var data = JsonSerializer.Serialize(new CachedListEntry { Version = version, Data = result });
         var expiry = GetDuration(resourceKey, duration);
 
         await _cache.SetStringAsync(key, data, new DistributedCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = expiry
         }, ct);
-
-        // Track the key for invalidation
-        var bag = _keyRegistry.GetOrAdd(resourceKey, _ => new System.Collections.Concurrent.ConcurrentBag<string>());
-        bag.Add(key);
     }
 
     /// <inheritdoc />
@@ -106,11 +115,12 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
     /// <inheritdoc />
     public async Task InvalidateResourceAsync(string resourceKey, CancellationToken ct = default)
     {
-        if (_keyRegistry.TryRemove(resourceKey, out var keys))
-        {
-            foreach (var key in keys)
-                await _cache.RemoveAsync(key, ct);
-        }
+        // Bump the per-resource list version so every previously cached list key becomes
+        // unreachable — across all processes sharing the distributed cache, not just this one.
+        // Stale entries then lapse by their own TTL. (Per-id get entries are invalidated by
+        // InvalidateAsync, whose key is deterministic and already cross-process.)
+        await _cache.SetStringAsync(ListVersionKey(resourceKey), Guid.NewGuid().ToString("N"),
+            new DistributedCacheEntryOptions(), ct);
     }
 
     /// <inheritdoc />
@@ -154,6 +164,27 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
     private string BuildKey(string resourceKey, string type, string suffix)
         => $"{_options.CacheKeyPrefix}{resourceKey}:{type}:{suffix}";
 
+    private string ListVersionKey(string resourceKey)
+        => $"{_options.CacheKeyPrefix}{resourceKey}:listver";
+
+    /// <inheritdoc />
+    public Task<string> GetListVersionAsync(string resourceKey, CancellationToken ct = default)
+        => GetOrInitListVersionAsync(resourceKey, ct);
+
+    // Returns the current list-cache version for a resource, initializing it to a fresh random value
+    // when absent. Used on WRITE so entries are never stamped with a guessable/default version that a
+    // reader could match after the version key is evicted.
+    private async Task<string> GetOrInitListVersionAsync(string resourceKey, CancellationToken ct)
+    {
+        var key = ListVersionKey(resourceKey);
+        var existing = await _cache.GetStringAsync(key, ct);
+        if (existing is not null) return existing;
+
+        var fresh = Guid.NewGuid().ToString("N");
+        await _cache.SetStringAsync(key, fresh, new DistributedCacheEntryOptions(), ct);
+        return fresh;
+    }
+
     private TimeSpan GetDuration(string resourceKey, TimeSpan? @override)
     {
         if (@override.HasValue) return @override.Value;
@@ -176,5 +207,13 @@ public sealed class DistributedQueryResultCache : IQueryResultCache
         if (!_options.EnableQueryCaching) return false;
         if (!_options.ResourceConfigs.TryGetValue(resourceKey, out var config)) return true;
         return config.Enabled && config.CacheGet;
+    }
+
+    // Cached list payload stamped with the resource list-version it was written under, so a reader
+    // can detect invalidation (a version bump) regardless of process or version-key eviction.
+    private sealed class CachedListEntry
+    {
+        public string Version { get; set; } = "0";
+        public PagedResult<JsonObject>? Data { get; set; }
     }
 }

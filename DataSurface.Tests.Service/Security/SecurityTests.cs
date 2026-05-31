@@ -114,10 +114,10 @@ public class SecurityTests : IDisposable
 
         var act = () => factory.CrudService.ListAsync("TenantItem", new QuerySpec());
 
-        // The UnauthorizedAccessException is thrown inside a reflection call,
-        // so it gets wrapped in a TargetInvocationException
-        var ex = await act.Should().ThrowAsync<Exception>();
-        ex.Which.InnerException.Should().BeOfType<UnauthorizedAccessException>();
+        // A required-but-missing tenant claim must surface as UnauthorizedAccessException
+        // directly (the reflection invoke uses BindingFlags.DoNotWrapExceptions), so the
+        // HTTP layer can map it to 401 rather than a generic 500.
+        await act.Should().ThrowAsync<UnauthorizedAccessException>();
     }
 
     [Fact]

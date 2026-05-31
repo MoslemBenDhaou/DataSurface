@@ -1,9 +1,11 @@
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using DataSurface.Dynamic.Contracts; // optional but recommended for dynamic catch-all
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -27,6 +29,14 @@ public static class DataSurfaceEndpointMapper
         DataSurfaceHttpOptions? options = null)
     {
         options ??= new DataSurfaceHttpOptions();
+
+        // Fail fast: API key auth without a validator would accept any non-empty key (presence-only,
+        // not real validation), which is a security footgun. Require an IApiKeyValidator to be registered.
+        if (options.EnableApiKeyAuth && app.ServiceProvider.GetService<IApiKeyValidator>() is null)
+            throw new InvalidOperationException(
+                "EnableApiKeyAuth is true but no IApiKeyValidator is registered. Register one " +
+                "(e.g. services.AddSingleton<IApiKeyValidator, MyValidator>()) so API keys are validated — " +
+                "without a validator, any non-empty key would be accepted.");
 
         var group = app.MapGroup(options.ApiPrefix);
 
@@ -75,6 +85,10 @@ public static class DataSurfaceEndpointMapper
         // /api/d/{route} and /api/d/{route}/{id}
         var dyn = group.MapGroup(opt.DynamicPrefix);
 
+        // The dynamic catch-all otherwise bypasses ApplyAuth's rate-limiting/API-key (authorization itself
+        // is enforced per-request in EnforceDynamicPolicyAsync), so attach those to the whole group here.
+        ApplyDynamicAuth(dyn, opt);
+
         // LIST dynamic: GET /api/d/{route}?...
         dyn.MapGet("/{route}", async (string route, HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
         {
@@ -83,6 +97,9 @@ public static class DataSurfaceEndpointMapper
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
+
+                var deny = await EnforceDynamicPolicyAsync(contract, CrudOperation.List, req.HttpContext, opt);
+                if (deny is not null) return deny;
 
                 return await HandleList(contract, req, res, sp, opt, ct);
             }
@@ -104,6 +121,9 @@ public static class DataSurfaceEndpointMapper
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
 
+                var deny = await EnforceDynamicPolicyAsync(contract, CrudOperation.List, req.HttpContext, opt);
+                if (deny is not null) return deny;
+
                 return await HandleHead(contract, req, res, sp, opt, ct);
             }
             catch (Exception ex)
@@ -123,6 +143,9 @@ public static class DataSurfaceEndpointMapper
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
+
+                var deny = await EnforceDynamicPolicyAsync(contract, CrudOperation.Get, req.HttpContext, opt);
+                if (deny is not null) return deny;
 
                 return await HandleGet(contract, id, req, res, sp, opt, ct);
             }
@@ -144,6 +167,9 @@ public static class DataSurfaceEndpointMapper
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
 
+                var deny = await EnforceDynamicPolicyAsync(contract, CrudOperation.Create, req.HttpContext, opt);
+                if (deny is not null) return deny;
+
                 return await HandleCreate(contract, body, req, res, sp, opt, ct);
             }
             catch (Exception ex)
@@ -164,6 +190,9 @@ public static class DataSurfaceEndpointMapper
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
 
+                var deny = await EnforceDynamicPolicyAsync(contract, CrudOperation.Update, req.HttpContext, opt);
+                if (deny is not null) return deny;
+
                 return await HandleUpdate(contract, id, patch, req, res, sp, opt, ct);
             }
             catch (Exception ex)
@@ -183,6 +212,9 @@ public static class DataSurfaceEndpointMapper
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
+
+                var deny = await EnforceDynamicPolicyAsync(contract, CrudOperation.Delete, req.HttpContext, opt);
+                if (deny is not null) return deny;
 
                 return await HandleDelete(contract, id, req, sp, opt, ct);
             }
@@ -396,6 +428,64 @@ public static class DataSurfaceEndpointMapper
         }
     }
 
+    // Applies the rate-limiting and API-key concerns to the dynamic catch-all group. Authorization
+    // (per-resource policy OR the default requirement) is enforced per-request in EnforceDynamicPolicyAsync,
+    // because the resource — and thus its policy — is only known per request.
+    private static void ApplyDynamicAuth(RouteGroupBuilder dyn, DataSurfaceHttpOptions opt)
+    {
+        if (opt.EnableRateLimiting && !string.IsNullOrWhiteSpace(opt.RateLimitingPolicy))
+            dyn.RequireRateLimiting(opt.RateLimitingPolicy);
+
+        if (opt.EnableApiKeyAuth)
+        {
+            dyn.AddEndpointFilterFactory((context, next) =>
+            {
+                var validator = context.ApplicationServices.GetService<IApiKeyValidator>();
+                var filter = new DataSurfaceApiKeyFilter(opt, validator);
+                return invocationContext => filter.InvokeAsync(invocationContext, next);
+            });
+        }
+    }
+
+    // Enforces a resource's per-operation authorization policy on the dynamic catch-all routes,
+    // where a static .RequireAuthorization(policy) cannot be attached at map-time (the resource is
+    // only known per request). Returns a deny result (403 if authenticated, 401 otherwise) or null
+    // when the request is allowed / no policy applies.
+    private static async Task<IResult?> EnforceDynamicPolicyAsync(ResourceContract c, CrudOperation op, HttpContext http, DataSurfaceHttpOptions opt)
+    {
+        // Mirror static ApplyAuth: a resource's own per-operation policy takes precedence; otherwise fall
+        // back to the default authorization requirement. Never require both.
+        string? policy;
+        if (c.Security.Policies.TryGetValue(op, out var resourcePolicy) && !string.IsNullOrWhiteSpace(resourcePolicy))
+            policy = resourcePolicy;
+        else if (opt.RequireAuthorizationByDefault)
+            policy = opt.DefaultPolicy; // may be null → require only an authenticated user
+        else
+            return null; // no authorization required
+
+        var authenticated = http.User.Identity?.IsAuthenticated ?? false;
+
+        if (!string.IsNullOrWhiteSpace(policy))
+        {
+            var authService = http.RequestServices.GetService<IAuthorizationService>();
+            if (authService is null)
+                return Results.Problem(
+                    "This resource requires an authorization policy, but authorization services are not configured (call AddAuthorization()).",
+                    statusCode: StatusCodes.Status500InternalServerError);
+
+            var result = await authService.AuthorizeAsync(http.User, policy);
+            if (result.Succeeded)
+                return null;
+        }
+        else if (authenticated)
+        {
+            // Default authorization with no named policy → an authenticated user is sufficient.
+            return null;
+        }
+
+        return authenticated ? Results.Forbid() : Results.Challenge();
+    }
+
     // ---------------------- CRUD handlers (shared) ----------------------
 
     private static async Task<IResult> HandleList(ResourceContract c, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
@@ -454,8 +544,9 @@ public static class DataSurfaceEndpointMapper
         var obj = await crud.GetAsync(c.ResourceKey, keyObj, expand, ct);
         if (obj is null) return Results.NotFound();
 
-        // Apply field projection if ?fields= is specified
-        if (req.Query.TryGetValue("fields", out var fieldsParam) && !string.IsNullOrWhiteSpace(fieldsParam))
+        // Apply field projection if ?fields= is specified (kill-switched by EnableFieldProjection)
+        if ((sp.GetService<DataSurfaceFeatures>()?.EnableFieldProjection ?? true)
+            && req.Query.TryGetValue("fields", out var fieldsParam) && !string.IsNullOrWhiteSpace(fieldsParam))
         {
             var requested = new HashSet<string>(
                 fieldsParam.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
@@ -610,6 +701,7 @@ public static class DataSurfaceEndpointMapper
         var allItems = new List<System.Text.Json.Nodes.JsonObject>();
         var page = 1;
         int total;
+        var truncated = false;
         do
         {
             var batchSpec = spec with { Page = page, PageSize = c.Query.MaxPageSize };
@@ -617,7 +709,19 @@ public static class DataSurfaceEndpointMapper
             allItems.AddRange(result.Items);
             total = result.Total;
             page++;
+
+            // Bound memory: export materializes the whole result set, so cap it.
+            if (allItems.Count >= opt.MaxExportRows)
+            {
+                if (allItems.Count > opt.MaxExportRows)
+                    allItems.RemoveRange(opt.MaxExportRows, allItems.Count - opt.MaxExportRows);
+                truncated = allItems.Count < total;
+                break;
+            }
         } while (allItems.Count < total);
+
+        if (truncated)
+            res.Headers["X-Export-Truncated"] = "true";
 
         if (format == "csv")
         {

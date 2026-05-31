@@ -26,6 +26,12 @@ public static class ModelBuilderExtensions
             b.Property(x => x.EntityKey).HasMaxLength(200).IsRequired();
             b.Property(x => x.Route).HasMaxLength(200).IsRequired();
             b.Property(x => x.KeyName).HasMaxLength(100).IsRequired();
+            b.Property(x => x.TenantFieldName).HasMaxLength(200);
+            b.Property(x => x.TenantFieldApiName).HasMaxLength(200);
+            b.Property(x => x.TenantClaimType).HasMaxLength(200);
+
+            // Optimistic concurrency for admin metadata edits (B10).
+            b.Property(x => x.UpdatedAt).IsConcurrencyToken();
 
             b.HasMany(x => x.Properties).WithOne(x => x.EntityDef).HasForeignKey(x => x.EntityDefId);
             b.HasMany(x => x.Relations).WithOne(x => x.EntityDef).HasForeignKey(x => x.EntityDefId);
@@ -59,7 +65,9 @@ public static class ModelBuilderExtensions
             b.Property(x => x.DataJson).IsRequired();
 
             b.Property(x => x.RowVersion).IsRowVersion();
+            b.Property(x => x.TenantValue).HasMaxLength(200);
             b.HasIndex(x => new { x.EntityKey, x.IsDeleted });
+            b.HasIndex(x => new { x.EntityKey, x.TenantValue });
         });
 
         mb.Entity<DsDynamicIndexRow>(b =>

@@ -18,6 +18,7 @@ namespace DataSurface.EFCore.Queries;
 public sealed class CompiledQueryCache
 {
     private readonly ConcurrentDictionary<string, object> _findByIdQueries = new();
+    private readonly ConcurrentDictionary<string, object> _findByIdAsyncQueries = new();
     private readonly ConcurrentDictionary<string, object> _countQueries = new();
     private readonly ConcurrentDictionary<string, object> _existsQueries = new();
 
@@ -36,6 +37,25 @@ public sealed class CompiledQueryCache
         return (Func<DbContext, TKey, TEntity?>)_findByIdQueries.GetOrAdd(cacheKey, _ =>
             EF.CompileQuery((DbContext db, TKey id) =>
                 db.Set<TEntity>().FirstOrDefault(e => EF.Property<TKey>(e, keyPropertyName)!.Equals(id))));
+    }
+
+    /// <summary>
+    /// Gets or creates a compiled <em>asynchronous</em>, no-tracking query for finding an entity by ID.
+    /// Used by read paths with no per-request query composition (no row-level filter, tenant scope,
+    /// soft-delete predicate, or relation expansion), where a fixed primary-key lookup is sufficient.
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <typeparam name="TKey">The key type.</typeparam>
+    /// <param name="keyPropertyName">The name of the key property.</param>
+    /// <returns>A compiled async query delegate.</returns>
+    public Func<DbContext, TKey, CancellationToken, Task<TEntity?>> GetOrCreateFindByIdAsyncQuery<TEntity, TKey>(string keyPropertyName)
+        where TEntity : class
+    {
+        var cacheKey = $"{typeof(TEntity).FullName}:{keyPropertyName}:{typeof(TKey).Name}";
+
+        return (Func<DbContext, TKey, CancellationToken, Task<TEntity?>>)_findByIdAsyncQueries.GetOrAdd(cacheKey, _ =>
+            EF.CompileAsyncQuery((DbContext db, TKey id, CancellationToken ct) =>
+                db.Set<TEntity>().AsNoTracking().FirstOrDefault(e => EF.Property<TKey>(e, keyPropertyName)!.Equals(id))));
     }
 
     /// <summary>
@@ -77,10 +97,10 @@ public sealed class CompiledQueryCache
     {
         return new CompiledQueryCacheStats
         {
-            FindByIdQueryCount = _findByIdQueries.Count,
+            FindByIdQueryCount = _findByIdQueries.Count + _findByIdAsyncQueries.Count,
             CountQueryCount = _countQueries.Count,
             ExistsQueryCount = _existsQueries.Count,
-            TotalQueryCount = _findByIdQueries.Count + _countQueries.Count + _existsQueries.Count
+            TotalQueryCount = _findByIdQueries.Count + _findByIdAsyncQueries.Count + _countQueries.Count + _existsQueries.Count
         };
     }
 
@@ -90,6 +110,7 @@ public sealed class CompiledQueryCache
     public void Clear()
     {
         _findByIdQueries.Clear();
+        _findByIdAsyncQueries.Clear();
         _countQueries.Clear();
         _existsQueries.Clear();
     }

@@ -70,6 +70,29 @@ public sealed class DsEntityDefRow
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     /// <summary>
+    /// Gets or sets the CLR/property name of the tenant-isolation field, or null if the resource is not tenant-scoped.
+    /// </summary>
+    public string? TenantFieldName { get; set; }
+    /// <summary>
+    /// Gets or sets the API name of the tenant-isolation field.
+    /// </summary>
+    public string? TenantFieldApiName { get; set; }
+    /// <summary>
+    /// Gets or sets the claim type used to resolve the current tenant value.
+    /// </summary>
+    public string? TenantClaimType { get; set; }
+    /// <summary>
+    /// Gets or sets whether a tenant value is required (requests without one are rejected).
+    /// </summary>
+    public bool TenantRequired { get; set; }
+
+    /// <summary>
+    /// Gets or sets the per-operation authorization policies as a JSON object keyed by operation
+    /// name (e.g. <c>{"Create":"Admin"}</c>), or null when no policies are configured.
+    /// </summary>
+    public string? PoliciesJson { get; set; }
+
+    /// <summary>
     /// Gets or sets the property definitions for this entity.
     /// </summary>
     public ICollection<DsPropertyDefRow> Properties { get; set; } = new List<DsPropertyDefRow>();

@@ -102,4 +102,27 @@ public class SoftDeleteTests : IDisposable
 
         await act.Should().ThrowAsync<CrudNotFoundException>();
     }
+
+    // ────────────────────────────────────────────
+    //  B12: soft-deleted rows are hidden from reads by default
+    // ────────────────────────────────────────────
+
+    [Fact]
+    public async Task ListAndGet_ExcludeSoftDeletedItems()
+    {
+        _db.SoftDeleteItems.AddRange(
+            new SoftDeleteItem { Name = "Active" },
+            new SoftDeleteItem { Name = "Removed" });
+        await _db.SaveChangesAsync();
+        var removedId = _db.SoftDeleteItems.First(x => x.Name == "Removed").Id;
+
+        await _factory.CrudService.DeleteAsync("SoftDeleteItem", removedId); // soft delete
+
+        var list = await _factory.CrudService.ListAsync("SoftDeleteItem", new QuerySpec());
+        list.Items.Should().HaveCount(1);
+        list.Total.Should().Be(1);
+
+        var got = await _factory.CrudService.GetAsync("SoftDeleteItem", removedId);
+        got.Should().BeNull();
+    }
 }

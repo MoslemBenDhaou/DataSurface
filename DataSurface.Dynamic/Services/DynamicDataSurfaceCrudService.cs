@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using DataSurface.Dynamic.Contracts;
@@ -33,6 +34,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly ILogger<DynamicDataSurfaceCrudService> _logger;
 
     private readonly IResourceContractProvider _compositeContracts; // for expand targets
+    private readonly CrudSecurityDispatcher? _security;
+    private readonly DataSurfaceFeatures _features;
 
     private readonly JsonSerializerOptions _jsonOpt = new()
     {
@@ -51,6 +54,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="resourceHooks">Dispatcher for resource-specific hooks.</param>
     /// <param name="overrides">Registry of per-resource override delegates.</param>
     /// <param name="logger">The logger instance.</param>
+    /// <param name="security">Optional security dispatcher for authorization, redaction and audit logging.</param>
+    /// <param name="features">Optional feature flags; a feature runs only when its flag is enabled and its wiring is present.</param>
     public DynamicDataSurfaceCrudService(
         DbContext db,
         DynamicResourceContractProvider contracts,
@@ -60,7 +65,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         CrudHookDispatcher globalHooks,
         CrudResourceHookDispatcher resourceHooks,
         CrudOverrideRegistry overrides,
-        ILogger<DynamicDataSurfaceCrudService> logger)
+        ILogger<DynamicDataSurfaceCrudService> logger,
+        CrudSecurityDispatcher? security = null,
+        DataSurfaceFeatures? features = null)
     {
         _db = db;
         _contracts = contracts;
@@ -71,6 +78,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         _resourceHooks = resourceHooks;
         _overrides = overrides;
         _logger = logger;
+        _security = security;
+        _features = features ?? new DataSurfaceFeatures();
     }
 
     /// <inheritdoc />
@@ -95,7 +104,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _globalHooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<ListOverride>(c.ResourceKey, CrudOperation.List, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<ListOverride>(c.ResourceKey, CrudOperation.List, out var ov))
         {
             var result = await ov!(c, spec, expand, svcCtx, ct);
             await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -105,6 +114,13 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var baseQuery = _db.Set<DsDynamicRecordRow>()
             .AsNoTracking()
             .Where(r => r.EntityKey == c.ResourceKey && !r.IsDeleted);
+
+        // Tenant isolation
+        if (_features.EnableTenantIsolation && c.Tenant is not null)
+        {
+            var tenantValue = ResolveTenantValue(c);
+            baseQuery = baseQuery.Where(r => r.TenantValue == tenantValue);
+        }
 
         var filtered = ApplyFilters(baseQuery, c, spec);
         var total = await filtered.CountAsync(ct);
@@ -132,7 +148,13 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             items.Add(obj);
         }
 
+        // Field-level authorization: redact unauthorized fields from the list results.
+        _security?.RedactUnauthorizedFields(c, items);
+
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.List, resourceKey), ct);
 
         _logger.LogDebug("Dynamic List {Resource} completed in {ElapsedMs}ms, returned {Count}/{Total} items",
             resourceKey, sw.ElapsedMilliseconds, items.Count, total);
@@ -162,7 +184,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _globalHooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<GetOverride>(c.ResourceKey, CrudOperation.Get, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<GetOverride>(c.ResourceKey, CrudOperation.Get, out var ov))
         {
             var result = await ov!(c, id, expand, svcCtx, ct);
             await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -170,9 +192,15 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         var idStr = NormalizeIdString(id);
-        var row = await _db.Set<DsDynamicRecordRow>()
+        var getQuery = _db.Set<DsDynamicRecordRow>()
             .AsNoTracking()
-            .FirstOrDefaultAsync(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted, ct);
+            .Where(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted);
+        if (_features.EnableTenantIsolation && c.Tenant is not null)
+        {
+            var tenantValue = ResolveTenantValue(c);
+            getQuery = getQuery.Where(r => r.TenantValue == tenantValue);
+        }
+        var row = await getQuery.FirstOrDefaultAsync(ct);
 
         if (row is null)
         {
@@ -181,10 +209,21 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         var obj = ProjectRowToJson(row, c);
+
+        // Resource-level authorization
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, obj, typeof(JsonObject), CrudOperation.Get, ct);
+
         if (expand is not null) await ApplyExpandAsync(obj, row, c, expand, ct);
+
+        // Field-level authorization (redact unauthorized fields)
+        _security?.RedactUnauthorizedFields(c, obj);
 
         await _resourceHooks.AfterReadAsync(c.ResourceKey, row.Id, obj, hookCtx);
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Get, resourceKey, id.ToString()), ct);
 
         _logger.LogDebug("Dynamic Get {Resource} id={Id} completed in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return obj;
@@ -206,14 +245,17 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.Create);
 
-        ValidateBody(c, CrudOperation.Create, body);
+        ValidateBody(c, CrudOperation.Create, body, _features.EnableFieldValidation);
+
+        // Field-level write authorization
+        _security?.ValidateFieldWriteAuthorization(c, body, CrudOperation.Create);
 
         var hookCtx = NewHookCtx(c, CrudOperation.Create);
         var svcCtx = NewSvcCtx();
 
         await _globalHooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<CreateOverride>(c.ResourceKey, CrudOperation.Create, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<CreateOverride>(c.ResourceKey, CrudOperation.Create, out var ov))
         {
             var result = await ov!(c, body, svcCtx, ct);
             await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -230,11 +272,18 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var stored = BuildStoredJson(c, CrudOperation.Create, body);
         stored[keyApi] = recordId;
 
+        // Tenant isolation: resolve the current tenant and stamp it on the record (server-set,
+        // overriding any client value) so records are filtered by tenant at the storage layer.
+        var tenantValue = ResolveTenantValue(c);
+        if (c.Tenant is not null && tenantValue is not null)
+            stored[c.Tenant.FieldApiName] = tenantValue;
+
         var row = new DsDynamicRecordRow
         {
             EntityKey = c.ResourceKey,
             Id = recordId,
             DataJson = stored.ToJsonString(),
+            TenantValue = tenantValue,
             IsDeleted = false,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
@@ -250,6 +299,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         await _resourceHooks.AfterCreateAsync(c.ResourceKey, created, hookCtx);
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Create, resourceKey, recordId, changes: body), ct);
 
         _logger.LogInformation("Dynamic Created {Resource} id={Id} in {ElapsedMs}ms", resourceKey, recordId, sw.ElapsedMilliseconds);
         return created;
@@ -272,14 +324,17 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var c = await _contracts.GetByResourceKeyAsync(resourceKey, ct);
         EnsureEnabled(c, CrudOperation.Update);
 
-        ValidateBody(c, CrudOperation.Update, patch);
+        ValidateBody(c, CrudOperation.Update, patch, _features.EnableFieldValidation);
+
+        // Field-level write authorization
+        _security?.ValidateFieldWriteAuthorization(c, patch, CrudOperation.Update);
 
         var hookCtx = NewHookCtx(c, CrudOperation.Update);
         var svcCtx = NewSvcCtx();
 
         await _globalHooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<UpdateOverride>(c.ResourceKey, CrudOperation.Update, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<UpdateOverride>(c.ResourceKey, CrudOperation.Update, out var ov))
         {
             var result = await ov!(c, id, patch, svcCtx, ct);
             await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -289,10 +344,20 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var idStr = NormalizeIdString(id);
 
         // Load tracked entity for concurrency
-        var row = await _db.Set<DsDynamicRecordRow>()
-            .FirstOrDefaultAsync(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted, ct);
+        var updQuery = _db.Set<DsDynamicRecordRow>()
+            .Where(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted);
+        if (_features.EnableTenantIsolation && c.Tenant is not null)
+        {
+            var tenantValue = ResolveTenantValue(c);
+            updQuery = updQuery.Where(r => r.TenantValue == tenantValue);
+        }
+        var row = await updQuery.FirstOrDefaultAsync(ct);
 
         if (row is null) throw new CrudNotFoundException(resourceKey, id);
+
+        // Resource-level authorization
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, ProjectRowToJson(row, c), typeof(JsonObject), CrudOperation.Update, ct);
 
         await _resourceHooks.BeforeUpdateAsync(c.ResourceKey, id, patch, hookCtx);
 
@@ -317,6 +382,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         await _resourceHooks.AfterUpdateAsync(c.ResourceKey, id, updated, hookCtx);
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Update, resourceKey, id.ToString(), changes: patch), ct);
 
         _logger.LogInformation("Dynamic Updated {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
         return updated;
@@ -343,7 +411,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _globalHooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<DeleteOverride>(c.ResourceKey, CrudOperation.Delete, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<DeleteOverride>(c.ResourceKey, CrudOperation.Delete, out var ov))
         {
             await ov!(c, id, deleteSpec, svcCtx, ct);
             await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -351,10 +419,20 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         var idStr = NormalizeIdString(id);
-        var row = await _db.Set<DsDynamicRecordRow>()
-            .FirstOrDefaultAsync(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted, ct);
+        var delQuery = _db.Set<DsDynamicRecordRow>()
+            .Where(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted);
+        if (_features.EnableTenantIsolation && c.Tenant is not null)
+        {
+            var tenantValue = ResolveTenantValue(c);
+            delQuery = delQuery.Where(r => r.TenantValue == tenantValue);
+        }
+        var row = await delQuery.FirstOrDefaultAsync(ct);
 
         if (row is null) throw new CrudNotFoundException(resourceKey, id);
+
+        // Resource-level authorization
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, ProjectRowToJson(row, c), typeof(JsonObject), CrudOperation.Delete, ct);
 
         await _resourceHooks.BeforeDeleteAsync(c.ResourceKey, id, hookCtx);
 
@@ -370,6 +448,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             await _resourceHooks.AfterDeleteAsync(c.ResourceKey, id, hookCtx);
             await _globalHooks.AfterGlobalAsync(hookCtx);
 
+            if (_security is not null)
+                await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
+
             _logger.LogInformation("Dynamic Soft-deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
             return;
         }
@@ -382,6 +463,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _resourceHooks.AfterDeleteAsync(c.ResourceKey, id, hookCtx);
         await _globalHooks.AfterGlobalAsync(hookCtx);
+
+        if (_security is not null)
+            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
 
         _logger.LogInformation("Dynamic Deleted {Resource} id={Id} in {ElapsedMs}ms", resourceKey, id, sw.ElapsedMilliseconds);
     }
@@ -399,6 +483,21 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     {
         if (!c.Operations.TryGetValue(op, out var oc) || !oc.Enabled)
             throw new InvalidOperationException($"Operation '{op}' is disabled for resource '{c.ResourceKey}'.");
+    }
+
+    // Resolves the current tenant value for a tenant-scoped resource, reusing the EF security
+    // dispatcher's claim resolution. Throws when a required tenant cannot be resolved.
+    private string? ResolveTenantValue(ResourceContract c)
+    {
+        if (!_features.EnableTenantIsolation || c.Tenant is null) return null;
+
+        var value = _security?.GetTenantId(c.Tenant);
+
+        if (value is null && c.Tenant.Required)
+            throw new UnauthorizedAccessException(
+                $"Tenant claim '{c.Tenant.ClaimType}' is required but was not found.");
+
+        return value;
     }
 
     private static string NormalizeIdString(object id)
@@ -427,19 +526,19 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         });
     }
 
-    private static JsonObject ProjectRowToJson(DsDynamicRecordRow row, ResourceContract contract, string? projectedFields = null)
+    private JsonObject ProjectRowToJson(DsDynamicRecordRow row, ResourceContract contract, string? projectedFields = null)
     {
         var obj = JsonNode.Parse(row.DataJson)?.AsObject() ?? new JsonObject();
         return ProjectJsonToReadShape(contract, obj, projectedFields);
     }
 
-    private static JsonObject ProjectJsonToReadShape(ResourceContract c, JsonObject json, string? projectedFields = null)
+    private JsonObject ProjectJsonToReadShape(ResourceContract c, JsonObject json, string? projectedFields = null)
     {
         var o = new JsonObject();
         var readFields = c.Fields.Where(f => f.InRead && !f.Hidden);
 
-        // Apply field projection if specified
-        if (!string.IsNullOrWhiteSpace(projectedFields))
+        // Apply field projection if specified (kill-switched by EnableFieldProjection)
+        if (_features.EnableFieldProjection && !string.IsNullOrWhiteSpace(projectedFields))
         {
             var requested = new HashSet<string>(
                 projectedFields.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
@@ -755,8 +854,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             if (rel.Write.Mode == RelationWriteMode.ById)
             {
                 var targetId = node.ToJsonString().Trim('"');
-                var target = await GetAsync(targetContract.ResourceKey, targetId, expand: null, ct);
-                projected[relApi] = target;
+                var targets = await LoadExpandTargetsAsync(targetContract, new[] { targetId }, ct);
+                projected[relApi] = targets.TryGetValue(targetId, out var t) ? t.DeepClone() : null;
             }
             else if (rel.Write.Mode == RelationWriteMode.ByIdList)
             {
@@ -766,29 +865,70 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
                     continue;
                 }
 
+                // Batch-load all related ids in one query instead of one Get per id (fixes N+1),
+                // preserving tenant isolation + resource auth + field redaction on the targets.
+                var ids = arr.Where(x => x is not null).Select(x => x!.ToJsonString().Trim('"')).ToList();
+                var targets = await LoadExpandTargetsAsync(targetContract, ids, ct);
+
                 var outArr = new JsonArray();
-                foreach (var idNode in arr)
-                {
-                    if (idNode is null) continue;
-                    var targetId = idNode.ToJsonString().Trim('"');
-                    var target = await GetAsync(targetContract.ResourceKey, targetId, expand: null, ct);
-                    if (target != null) outArr.Add(target);
-                }
+                foreach (var id in ids)
+                    if (targets.TryGetValue(id, out var t))
+                        outArr.Add(t.DeepClone());
                 projected[relApi] = outArr;
             }
         }
     }
 
-    private static void ValidateBody(ResourceContract c, CrudOperation op, JsonObject body)
+    // Batch-loads dynamic expand targets by id in a single query, projecting each to its read shape
+    // and applying the SAME security as a direct Get: tenant isolation (in the query predicate),
+    // resource-level authorization, and field redaction. (The per-item AfterRead hook / audit / Get
+    // overrides are intentionally not run for included/expanded items.)
+    private async Task<Dictionary<string, JsonObject>> LoadExpandTargetsAsync(
+        ResourceContract targetContract, IReadOnlyCollection<string> ids, CancellationToken ct)
+    {
+        var map = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        if (ids.Count == 0) return map;
+
+        var idList = ids.Distinct(StringComparer.Ordinal).ToList();
+
+        var query = _db.Set<DsDynamicRecordRow>().AsNoTracking()
+            .Where(r => r.EntityKey == targetContract.ResourceKey && idList.Contains(r.Id) && !r.IsDeleted);
+
+        if (_features.EnableTenantIsolation && targetContract.Tenant is not null)
+        {
+            var tenantValue = ResolveTenantValue(targetContract);
+            query = query.Where(r => r.TenantValue == tenantValue);
+        }
+
+        var rows = await query.ToListAsync(ct);
+        foreach (var r in rows)
+        {
+            var o = ProjectRowToJson(r, targetContract);
+
+            if (_security is not null)
+                await _security.AuthorizeResourceAsync(targetContract, o, typeof(JsonObject), CrudOperation.Get, ct);
+            _security?.RedactUnauthorizedFields(targetContract, o);
+
+            map[r.Id] = o;
+        }
+
+        return map;
+    }
+
+    private static void ValidateBody(ResourceContract c, CrudOperation op, JsonObject body, bool validateFieldConstraints)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         var oc = c.Operations[op];
 
         var allowed = new HashSet<string>(oc.InputShape, StringComparer.OrdinalIgnoreCase);
+        // The optimistic-concurrency token is valid on update even though it is not part of the
+        // writable update shape; allow it through (it is consumed by the concurrency check).
+        var concurrencyApiName = op == CrudOperation.Update ? oc.Concurrency?.FieldApiName : null;
 
         foreach (var key in body.Select(kv => kv.Key))
         {
-            if (!allowed.Contains(key))
+            if (!allowed.Contains(key)
+                && !string.Equals(key, concurrencyApiName, StringComparison.OrdinalIgnoreCase))
                 errors[key] = new[] { "Field is not allowed for this operation." };
         }
 
@@ -803,7 +943,6 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         if (op == CrudOperation.Update)
         {
-            var concurrencyApiName = oc.Concurrency?.FieldApiName;
             foreach (var imm in oc.ImmutableFields)
             {
                 if (body.ContainsKey(imm)
@@ -819,7 +958,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         // Field-level validation (MinLength, MaxLength, Min, Max, Regex, AllowedValues)
-        DataSurface.EFCore.Validation.FieldValidator.ValidateFieldConstraints(c, body, errors);
+        if (validateFieldConstraints)
+            DataSurface.EFCore.Validation.FieldValidator.ValidateFieldConstraints(c, body, errors);
 
         if (errors.Count > 0)
             throw new CrudRequestValidationException(errors);

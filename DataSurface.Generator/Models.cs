@@ -14,6 +14,7 @@ namespace DataSurface.Generator;
 /// <param name="Key">The key property model.</param>
 /// <param name="Concurrency">The concurrency property model, if configured.</param>
 /// <param name="Fields">The field property models.</param>
+/// <param name="Policies">Per-operation authorization policies (operation name -> policy) from [CrudAuthorize].</param>
 internal sealed record ResourceModel(
     INamedTypeSymbol EntitySymbol,
     string Namespace,
@@ -22,7 +23,8 @@ internal sealed record ResourceModel(
     string Route,
     PropertyModel Key,
     PropertyModel? Concurrency,
-    IReadOnlyList<PropertyModel> Fields);
+    IReadOnlyList<PropertyModel> Fields,
+    IReadOnlyDictionary<string, string> Policies);
 
 /// <summary>
 /// Model describing a single property exposed by a resource.

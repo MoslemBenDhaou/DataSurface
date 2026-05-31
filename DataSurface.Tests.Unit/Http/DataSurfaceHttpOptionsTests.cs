@@ -13,12 +13,13 @@ public class DataSurfaceHttpOptionsTests
 
         options.ApiPrefix.Should().Be("/api");
         options.MapStaticResources.Should().BeTrue();
-        options.MapDynamicCatchAll.Should().BeTrue();
+        // Dynamic catch-all, the discovery endpoint, and ETags are opt-in (must be explicitly enabled).
+        options.MapDynamicCatchAll.Should().BeFalse();
         options.DynamicPrefix.Should().Be("/d");
-        options.MapResourceDiscoveryEndpoint.Should().BeTrue();
+        options.MapResourceDiscoveryEndpoint.Should().BeFalse();
         options.RequireAuthorizationByDefault.Should().BeFalse();
         options.DefaultPolicy.Should().BeNull();
-        options.EnableEtags.Should().BeTrue();
+        options.EnableEtags.Should().BeFalse();
         options.ThrowOnRouteCollision.Should().BeFalse();
     }
 
@@ -119,22 +120,6 @@ public class DataSurfaceHttpOptionsTests
     }
 
     [Fact]
-    public void EnableWebhooks_DefaultValue_IsFalse()
-    {
-        var options = new DataSurfaceHttpOptions();
-
-        options.EnableWebhooks.Should().BeFalse();
-    }
-
-    [Fact]
-    public void EnableWebhooks_WhenSet_ReturnsSetValue()
-    {
-        var options = new DataSurfaceHttpOptions { EnableWebhooks = true };
-
-        options.EnableWebhooks.Should().BeTrue();
-    }
-
-    [Fact]
     public void AllNewOptions_CanBeSetTogether()
     {
         var options = new DataSurfaceHttpOptions
@@ -144,8 +129,7 @@ public class DataSurfaceHttpOptionsTests
             EnableRateLimiting = true,
             RateLimitingPolicy = "DataSurfacePolicy",
             EnableApiKeyAuth = true,
-            ApiKeyHeaderName = "X-Custom-Key",
-            EnableWebhooks = true
+            ApiKeyHeaderName = "X-Custom-Key"
         };
 
         options.EnablePutForFullUpdate.Should().BeTrue();
@@ -154,6 +138,5 @@ public class DataSurfaceHttpOptionsTests
         options.RateLimitingPolicy.Should().Be("DataSurfacePolicy");
         options.EnableApiKeyAuth.Should().BeTrue();
         options.ApiKeyHeaderName.Should().Be("X-Custom-Key");
-        options.EnableWebhooks.Should().BeTrue();
     }
 }

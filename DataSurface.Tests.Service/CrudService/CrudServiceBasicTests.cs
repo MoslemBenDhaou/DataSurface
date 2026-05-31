@@ -64,6 +64,27 @@ public class CrudServiceBasicTests : IDisposable
     }
 
     // ────────────────────────────────────────────
+    //  FILTER ERROR HANDLING (B1)
+    // ────────────────────────────────────────────
+
+    [Fact]
+    public async Task ListAsync_InvalidFilterValue_ThrowsValidationDirectly()
+    {
+        await SeedItems(3);
+
+        // "price" is a Decimal field; a non-numeric filter value makes the query engine
+        // throw CrudRequestValidationException. The engine runs through a reflection
+        // invoke that now uses BindingFlags.DoNotWrapExceptions, so the exception must
+        // surface directly rather than wrapped in TargetInvocationException (which would
+        // otherwise map to HTTP 500 instead of 400).
+        var spec = new QuerySpec(Filters: new Dictionary<string, string> { ["price"] = "gte:not-a-number" });
+
+        var act = () => _factory.CrudService.ListAsync("SimpleItem", spec);
+
+        await act.Should().ThrowAsync<CrudRequestValidationException>();
+    }
+
+    // ────────────────────────────────────────────
     //  CREATE
     // ────────────────────────────────────────────
 

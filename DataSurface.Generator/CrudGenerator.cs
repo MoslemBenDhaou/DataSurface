@@ -38,6 +38,8 @@ public sealed class CrudGenerator : IIncrementalGenerator
             var crudKeyAttr = compilation.GetTypeByMetadataName("DataSurface.Core.Annotations.CrudKeyAttribute");
             var crudIgnoreAttr = compilation.GetTypeByMetadataName("DataSurface.Core.Annotations.CrudIgnoreAttribute");
             var crudDtoEnum = compilation.GetTypeByMetadataName("DataSurface.Core.Enums.CrudDto");
+            var crudAuthorizeAttr = compilation.GetTypeByMetadataName("DataSurface.Core.Annotations.CrudAuthorizeAttribute");
+            var crudOperationEnum = compilation.GetTypeByMetadataName("DataSurface.Core.Enums.CrudOperation");
 
             if (crudFieldAttr is null || crudKeyAttr is null || crudDtoEnum is null) return;
 
@@ -58,6 +60,27 @@ public sealed class CrudGenerator : IIncrementalGenerator
 
                 var resourceKey = resAttr.GetNamedArgString("ResourceKey") ?? t.Name;
                 var ns = t.ContainingNamespace?.ToDisplayString() ?? "GlobalNamespace";
+
+                // Per-operation authorization policies from [CrudAuthorize]; emitted onto the
+                // generated routes so they enforce the same policies as the runtime mapper.
+                var policies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (crudAuthorizeAttr is not null)
+                {
+                    foreach (var authAttr in t.GetAttributes()
+                        .Where(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, crudAuthorizeAttr)))
+                    {
+                        var policy = authAttr.ConstructorArguments.Length > 0
+                            ? authAttr.ConstructorArguments[0].Value as string
+                            : null;
+                        if (string.IsNullOrWhiteSpace(policy)) continue;
+
+                        var opName = GetOperationName(authAttr, crudOperationEnum);
+                        if (opName is null)
+                            foreach (var o in AllOperationNames) policies[o] = policy!;
+                        else
+                            policies[opName] = policy!;
+                    }
+                }
 
                 // Collect properties
                 var props = t.GetMembers()
@@ -163,7 +186,8 @@ public sealed class CrudGenerator : IIncrementalGenerator
                     Route: route!,
                     Key: keyModel,
                     Concurrency: concurrency,
-                    Fields: fields));
+                    Fields: fields,
+                    Policies: policies));
             }
 
             // Emit DTOs + endpoint mapper
@@ -252,9 +276,15 @@ public sealed class CrudGenerator : IIncrementalGenerator
             var ns = $"{r.Namespace}.DataSurfaceGenerated";
             var readDto = $"{ns}.{r.EntityName}ReadDto";
             var createDto = $"{ns}.{r.EntityName}CreateDto";
-            var updateDto = $"{ns}.{r.EntityName}UpdateDto";
 
             var route = "/" + r.Route.Trim('/');
+
+            // Per-operation authorization suffixes (mirrors the runtime mapper's ApplyAuth).
+            var listAuth = AuthSuffix(r, "List");
+            var getAuth = AuthSuffix(r, "Get");
+            var createAuth = AuthSuffix(r, "Create");
+            var updateAuth = AuthSuffix(r, "Update");
+            var deleteAuth = AuthSuffix(r, "Delete");
 
             sb.AppendLine($"    // {r.ResourceKey}");
             sb.AppendLine($"    g.MapGet(\"{route}\", async (HttpRequest req, IDataSurfaceCrudService crud, IResourceContractProvider contracts, CancellationToken ct) =>");
@@ -265,7 +295,7 @@ public sealed class CrudGenerator : IIncrementalGenerator
             sb.AppendLine($"      var page = await crud.ListAsync(\"{r.ResourceKey}\", spec, expand, ct);");
             sb.AppendLine($"      var items = page.Items.Select(x => JsonSerializer.Deserialize<{readDto}>(x.ToJsonString())!).ToList();");
             sb.AppendLine($"      return Results.Ok(new PagedResult<{readDto}>(items, page.Page, page.PageSize, page.Total));");
-            sb.AppendLine("    });");
+            sb.AppendLine($"    }}){listAuth};");
 
             sb.AppendLine($"    g.MapGet(\"{route}/{{id}}\", async (string id, HttpRequest req, HttpResponse res, IDataSurfaceCrudService crud, IResourceContractProvider contracts, CancellationToken ct) =>");
             sb.AppendLine("    {");
@@ -276,7 +306,7 @@ public sealed class CrudGenerator : IIncrementalGenerator
             sb.AppendLine("      if (obj is null) return Results.NotFound();");
             sb.AppendLine($"      var dto = JsonSerializer.Deserialize<{readDto}>(obj.ToJsonString())!;");
             sb.AppendLine("      return Results.Ok(dto);");
-            sb.AppendLine("    });");
+            sb.AppendLine($"    }}){getAuth};");
 
             sb.AppendLine($"    g.MapPost(\"{route}\", async ({createDto} body, HttpRequest req, IDataSurfaceCrudService crud, CancellationToken ct) =>");
             sb.AppendLine("    {");
@@ -284,17 +314,19 @@ public sealed class CrudGenerator : IIncrementalGenerator
             sb.AppendLine($"      var created = await crud.CreateAsync(\"{r.ResourceKey}\", json, ct);");
             sb.AppendLine($"      var dto = JsonSerializer.Deserialize<{readDto}>(created.ToJsonString())!;");
             sb.AppendLine("      return Results.Created(req.Path, dto);");
-            sb.AppendLine("    });");
+            sb.AppendLine($"    }}){createAuth};");
 
-            sb.AppendLine($"    g.MapMethods(\"{route}/{{id}}\", new[] {{ \"PATCH\" }}, async (string id, {updateDto} patch, HttpRequest req, IDataSurfaceCrudService crud, IResourceContractProvider contracts, CancellationToken ct) =>");
+            // PATCH binds the raw JSON body (not the typed Update DTO) so that an omitted
+            // property is distinguishable from an explicit null — preserving sparse-patch
+            // semantics instead of overwriting unspecified fields with null.
+            sb.AppendLine($"    g.MapMethods(\"{route}/{{id}}\", new[] {{ \"PATCH\" }}, async (string id, JsonObject patch, IDataSurfaceCrudService crud, IResourceContractProvider contracts, CancellationToken ct) =>");
             sb.AppendLine("    {");
             sb.AppendLine($"      var contract = contracts.GetByResourceKey(\"{r.ResourceKey}\");");
             sb.AppendLine("      var key = ParseId(id, contract);");
-            sb.AppendLine("      var json = JsonSerializer.SerializeToNode(patch)!.AsObject();");
-            sb.AppendLine($"      var updated = await crud.UpdateAsync(\"{r.ResourceKey}\", key, json, ct);");
+            sb.AppendLine($"      var updated = await crud.UpdateAsync(\"{r.ResourceKey}\", key, patch, ct);");
             sb.AppendLine($"      var dto = JsonSerializer.Deserialize<{readDto}>(updated.ToJsonString())!;");
             sb.AppendLine("      return Results.Ok(dto);");
-            sb.AppendLine("    });");
+            sb.AppendLine($"    }}){updateAuth};");
 
             sb.AppendLine($"    g.MapDelete(\"{route}/{{id}}\", async (string id, IDataSurfaceCrudService crud, IResourceContractProvider contracts, CancellationToken ct) =>");
             sb.AppendLine("    {");
@@ -302,7 +334,7 @@ public sealed class CrudGenerator : IIncrementalGenerator
             sb.AppendLine("      var key = ParseId(id, contract);");
             sb.AppendLine($"      await crud.DeleteAsync(\"{r.ResourceKey}\", key, deleteSpec: null, ct);");
             sb.AppendLine("      return Results.NoContent();");
-            sb.AppendLine("    });");
+            sb.AppendLine($"    }}){deleteAuth};");
         }
 
         // helpers
@@ -387,4 +419,32 @@ public sealed class CrudGenerator : IIncrementalGenerator
 
     private static string ToPascal(string s)
         => string.IsNullOrEmpty(s) ? s : char.ToUpperInvariant(s[0]) + s[1..];
+
+    private static readonly string[] AllOperationNames = { "List", "Get", "Create", "Update", "Delete" };
+
+    // Maps a [CrudAuthorize(..., Operation = CrudOperation.X)] named argument to the operation
+    // name. Returns null when no Operation is specified (the policy applies to all operations).
+    private static string GetOperationName(AttributeData authAttr, INamedTypeSymbol crudOperationEnum)
+    {
+        foreach (var kv in authAttr.NamedArguments)
+        {
+            if (kv.Key != "Operation") continue;
+            if (kv.Value.IsNull || kv.Value.Value is not int opInt) return null;
+            if (crudOperationEnum is null) return null;
+            foreach (var member in crudOperationEnum.GetMembers())
+            {
+                if (member is IFieldSymbol f && f.HasConstantValue
+                    && f.ConstantValue is int cv && cv == opInt)
+                    return f.Name;
+            }
+            return null;
+        }
+        return null;
+    }
+
+    // Emits the ".RequireAuthorization(\"policy\")" suffix for a generated route, or "" if none.
+    private static string AuthSuffix(ResourceModel r, string op)
+        => r.Policies.TryGetValue(op, out var p) && !string.IsNullOrWhiteSpace(p)
+            ? $".RequireAuthorization({Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(p, true)})"
+            : string.Empty;
 }

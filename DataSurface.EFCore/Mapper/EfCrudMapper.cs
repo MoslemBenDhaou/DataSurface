@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -20,12 +21,15 @@ namespace DataSurface.EFCore.Mapper;
 public sealed class EfCrudMapper
 {
     private readonly JsonSerializerOptions _json;
+    private readonly DataSurfaceFeatures _features;
 
     /// <summary>
     /// Creates a new mapper instance.
     /// </summary>
-    public EfCrudMapper()
+    /// <param name="features">Feature flags; default values are only applied when <see cref="DataSurfaceFeatures.EnableDefaultValues"/> is enabled.</param>
+    public EfCrudMapper(DataSurfaceFeatures? features = null)
     {
+        _features = features ?? new DataSurfaceFeatures();
         _json = new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true
@@ -56,6 +60,8 @@ public sealed class EfCrudMapper
     private void ApplyDefaultValues<TEntity>(TEntity entity, JsonObject body, ResourceContract contract)
         where TEntity : class
     {
+        if (!_features.EnableDefaultValues) return;
+
         foreach (var field in contract.Fields)
         {
             if (field.DefaultValue is null) continue;

@@ -1,5 +1,6 @@
 using DataSurface.Core.Contracts;
 using DataSurface.EFCore.Interfaces;
+using DataSurface.EFCore.Providers;
 
 namespace DataSurface.Dynamic.Contracts;
 
@@ -14,10 +15,11 @@ public sealed class CompositeResourceContractProvider : IResourceContractProvide
     /// <summary>
     /// Creates a new composite provider.
     /// </summary>
-    /// <param name="staticProvider">Provider for statically defined contracts.</param>
+    /// <param name="staticProvider">Provider for statically defined contracts (concrete type, so this
+    /// composite can itself be registered as <see cref="IResourceContractProvider"/> without recursion).</param>
     /// <param name="dynamicProvider">Provider for dynamically defined contracts.</param>
     public CompositeResourceContractProvider(
-        IResourceContractProvider staticProvider,
+        StaticResourceContractProvider staticProvider,
         DynamicResourceContractProvider dynamicProvider)
     {
         _staticProvider = staticProvider;

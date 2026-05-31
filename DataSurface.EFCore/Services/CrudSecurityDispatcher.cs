@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using System.Security.Claims;
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using DataSurface.EFCore.Interfaces;
@@ -14,14 +15,17 @@ namespace DataSurface.EFCore.Services;
 public sealed class CrudSecurityDispatcher
 {
     private readonly IServiceProvider _sp;
+    private readonly DataSurfaceFeatures _features;
 
     /// <summary>
     /// Creates a new security dispatcher.
     /// </summary>
     /// <param name="sp">The service provider for resolving security services.</param>
-    public CrudSecurityDispatcher(IServiceProvider sp)
+    /// <param name="features">Feature flags; each security concern is only enforced when its flag is enabled.</param>
+    public CrudSecurityDispatcher(IServiceProvider sp, DataSurfaceFeatures? features = null)
     {
         _sp = sp;
+        _features = features ?? new DataSurfaceFeatures();
     }
 
     /// <summary>
@@ -34,6 +38,8 @@ public sealed class CrudSecurityDispatcher
     public IQueryable<TEntity> ApplyResourceFilter<TEntity>(IQueryable<TEntity> query, ResourceContract contract)
         where TEntity : class
     {
+        if (!_features.EnableRowLevelSecurity) return query;
+
         // Try typed filter first
         var typedFilter = _sp.GetService<IResourceFilter<TEntity>>();
         if (typedFilter is not null)
@@ -68,11 +74,11 @@ public sealed class CrudSecurityDispatcher
     {
         // Use reflection to call the generic version
         var method = typeof(CrudSecurityDispatcher)
-            .GetMethod(nameof(ApplyResourceFilterInternal), 
+            .GetMethod(nameof(ApplyResourceFilterInternal),
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
             .MakeGenericMethod(entityType);
 
-        return (IQueryable)method.Invoke(this, [query, contract])!;
+        return (IQueryable)method.Invoke(this, System.Reflection.BindingFlags.DoNotWrapExceptions, null, [query, contract], null)!;
     }
 
     private IQueryable<TEntity> ApplyResourceFilterInternal<TEntity>(IQueryable query, ResourceContract contract)
@@ -92,7 +98,7 @@ public sealed class CrudSecurityDispatcher
     public IQueryable<TEntity> ApplyTenantFilter<TEntity>(IQueryable<TEntity> query, ResourceContract contract)
         where TEntity : class
     {
-        if (contract.Tenant is null) return query;
+        if (!_features.EnableTenantIsolation || contract.Tenant is null) return query;
 
         var tenantValue = GetTenantValue(contract.Tenant);
         if (tenantValue is null)
@@ -136,7 +142,7 @@ public sealed class CrudSecurityDispatcher
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
             .MakeGenericMethod(entityType);
 
-        return (IQueryable)method.Invoke(this, [query, contract])!;
+        return (IQueryable)method.Invoke(this, System.Reflection.BindingFlags.DoNotWrapExceptions, null, [query, contract], null)!;
     }
 
     private IQueryable<TEntity> ApplyTenantFilterInternal<TEntity>(IQueryable query, ResourceContract contract)
@@ -153,7 +159,7 @@ public sealed class CrudSecurityDispatcher
     /// <exception cref="UnauthorizedAccessException">Thrown when tenant claim is required but missing.</exception>
     public void SetTenantValue(object entity, ResourceContract contract)
     {
-        if (contract.Tenant is null) return;
+        if (!_features.EnableTenantIsolation || contract.Tenant is null) return;
 
         var tenantValue = GetTenantValue(contract.Tenant);
         if (tenantValue is null)
@@ -196,6 +202,15 @@ public sealed class CrudSecurityDispatcher
         }
     }
 
+    /// <summary>
+    /// Resolves the current tenant identifier for the given tenant configuration, via a
+    /// registered <see cref="ITenantResolver"/> or the current <see cref="ClaimsPrincipal"/>.
+    /// Returns <see langword="null"/> when no tenant can be resolved. Used by the dynamic CRUD
+    /// path to enforce tenant isolation with the same resolution logic as the EF path.
+    /// </summary>
+    /// <param name="tenant">The tenant contract describing the claim to read.</param>
+    public string? GetTenantId(TenantContract tenant) => GetTenantValue(tenant);
+
     private string? GetTenantValue(TenantContract tenant)
     {
         // Try to get tenant resolver from DI
@@ -223,6 +238,8 @@ public sealed class CrudSecurityDispatcher
         CrudOperation operation,
         CancellationToken ct = default) where TEntity : class
     {
+        if (!_features.EnableResourceAuthorization) return;
+
         // Try typed authorizer first
         var typedAuth = _sp.GetService<IResourceAuthorizer<TEntity>>();
         if (typedAuth is not null)
@@ -276,6 +293,8 @@ public sealed class CrudSecurityDispatcher
     /// <exception cref="UnauthorizedAccessException">Thrown when unauthorized fields are present.</exception>
     public void ValidateFieldWriteAuthorization(ResourceContract contract, JsonObject body, CrudOperation operation)
     {
+        if (!_features.EnableFieldAuthorization) return;
+
         var authorizer = _sp.GetService<IFieldAuthorizer>();
         if (authorizer is null) return;
 
@@ -294,6 +313,8 @@ public sealed class CrudSecurityDispatcher
     /// <param name="obj">The JSON object to redact.</param>
     public void RedactUnauthorizedFields(ResourceContract contract, JsonObject obj)
     {
+        if (!_features.EnableFieldAuthorization) return;
+
         var authorizer = _sp.GetService<IFieldAuthorizer>();
         authorizer?.RedactFields(contract, obj);
     }
@@ -305,6 +326,8 @@ public sealed class CrudSecurityDispatcher
     /// <param name="objects">The JSON objects to redact.</param>
     public void RedactUnauthorizedFields(ResourceContract contract, IEnumerable<JsonObject> objects)
     {
+        if (!_features.EnableFieldAuthorization) return;
+
         var authorizer = _sp.GetService<IFieldAuthorizer>();
         if (authorizer is null) return;
 
@@ -319,6 +342,8 @@ public sealed class CrudSecurityDispatcher
     /// <param name="ct">Cancellation token.</param>
     public async Task LogAuditAsync(AuditLogEntry entry, CancellationToken ct = default)
     {
+        if (!_features.EnableAuditLogging) return;
+
         var logger = _sp.GetService<IAuditLogger>();
         if (logger is not null)
             await logger.LogAsync(entry, ct);

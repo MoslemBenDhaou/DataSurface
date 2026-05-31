@@ -142,4 +142,49 @@ public class ConcurrencyTests : IDisposable
         result.Should().NotBeNull();
         result["name"]!.GetValue<string>().Should().Be("NewVersioned");
     }
+
+    // ────────────────────────────────────────────
+    //  B2: read-only concurrency token (the realistic [CrudConcurrency][CrudField(Read)]
+    //  shape) must be accepted on update and round-trip as base64 on read.
+    // ────────────────────────────────────────────
+
+    private static ResourceContract BuildReadOnlyTokenContract()
+    {
+        // RowVersion is read-only: NOT part of the update input shape (unlike
+        // BuildVersionedContract, which marks it InUpdate to dodge the bug).
+        var concurrency = new ConcurrencyContract(ConcurrencyMode.RowVersion, "rowVersion", RequiredOnUpdate: true);
+
+        return new ResourceContractBuilder("VersionedItem", "versioned-items")
+            .Key("Id", FieldType.Int32)
+            .WithField(new FieldBuilder("Id").OfType(FieldType.Int32).InRead().Immutable().Build())
+            .WithField(new FieldBuilder("Name").OfType(FieldType.String).ReadCreateUpdate().RequiredOnCreate().Build())
+            .WithField(new FieldBuilder("RowVersion").OfType(FieldType.String).ReadOnly().Build())
+            .WithConcurrency(concurrency)
+            .EnableAllOperations()
+            .Build();
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ReadOnlyConcurrencyToken_IsAcceptedAndRoundTripsAsBase64()
+    {
+        using var db = new CrudTestDbContext(new DbContextOptionsBuilder<CrudTestDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+        db.Database.EnsureCreated();
+        using var factory = new TestServiceFactory(db, new[] { BuildReadOnlyTokenContract() });
+
+        db.VersionedItems.Add(new VersionedItem { Name = "Original", RowVersion = TokenV1 });
+        await db.SaveChangesAsync();
+        var id = db.VersionedItems.First().Id;
+
+        // B2b: a byte[] rowversion must serialize as base64 on read.
+        var read = await factory.CrudService.GetAsync("VersionedItem", id);
+        read!["rowVersion"]!.GetValue<string>().Should().Be(TokenV1Base64);
+
+        // B2a: the token is not in the update input shape, but must still be accepted
+        // (previously rejected as "Field is not allowed").
+        var patch = new JsonObject { ["name"] = "Updated", ["rowVersion"] = TokenV1Base64 };
+        var result = await factory.CrudService.UpdateAsync("VersionedItem", id, patch);
+
+        result["name"]!.GetValue<string>().Should().Be("Updated");
+    }
 }

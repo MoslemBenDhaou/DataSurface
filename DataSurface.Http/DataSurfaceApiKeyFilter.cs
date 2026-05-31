@@ -38,14 +38,13 @@ public class DataSurfaceApiKeyFilter : IEndpointFilter
 
         var apiKey = apiKeyValues.First()!;
 
-        // Use custom validator if registered, otherwise accept any non-empty key
-        // (In production, users should register their own IApiKeyValidator)
-        if (_validator is not null)
-        {
-            var isValid = await _validator.ValidateAsync(apiKey, httpContext.RequestAborted);
-            if (!isValid)
-                return Results.Unauthorized();
-        }
+        // A validator is required whenever API key auth is enabled (enforced at startup in
+        // MapDataSurfaceCrud). Fail closed if it is somehow absent rather than accepting any key.
+        if (_validator is null)
+            return Results.Unauthorized();
+
+        if (!await _validator.ValidateAsync(apiKey, httpContext.RequestAborted))
+            return Results.Unauthorized();
 
         return await next(context);
     }

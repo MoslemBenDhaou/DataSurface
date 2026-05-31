@@ -119,6 +119,7 @@ GET /api/users/export?format=csv
 - Exports all records matching any applied query filters
 - Security filters (tenant, row-level) are respected
 - Field authorization redaction applies
+- Capped by `DataSurfaceHttpOptions.MaxExportRows` (default 100,000); when the cap is reached the response is truncated and an `X-Export-Truncated: true` header is added. For unbounded reads, use the [streaming endpoint](#async-streaming) instead.
 
 ### Import
 

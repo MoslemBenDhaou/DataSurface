@@ -73,6 +73,35 @@ public sealed class AdminEntityDefDto
     public bool EnableDelete { get; set; } = true;
 
     /// <summary>
+    /// Gets or sets the CLR/property name of the tenant-isolation field, or null if not tenant-scoped.
+    /// </summary>
+    public string? TenantFieldName { get; set; }
+    /// <summary>
+    /// Gets or sets the API name of the tenant-isolation field.
+    /// </summary>
+    public string? TenantFieldApiName { get; set; }
+    /// <summary>
+    /// Gets or sets the claim type used to resolve the current tenant value.
+    /// </summary>
+    public string? TenantClaimType { get; set; }
+    /// <summary>
+    /// Gets or sets whether a tenant value is required.
+    /// </summary>
+    public bool TenantRequired { get; set; }
+
+    /// <summary>
+    /// Gets or sets per-operation authorization policies (operation name -> policy name), e.g.
+    /// <c>{ "Create": "Admin" }</c>. Null/empty means no authorization is required.
+    /// </summary>
+    public Dictionary<string, string?>? Policies { get; set; }
+
+    /// <summary>
+    /// Gets or sets the row's last-updated timestamp, used as an optimistic-concurrency token.
+    /// Echo this value back on upsert to detect concurrent modifications (HTTP 409 on conflict).
+    /// </summary>
+    public DateTime? UpdatedAt { get; set; }
+
+    /// <summary>
     /// Gets or sets the property definitions that make up the resource schema.
     /// </summary>
     public List<AdminPropertyDefDto> Properties { get; set; } = new();

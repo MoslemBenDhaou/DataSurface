@@ -51,6 +51,32 @@ For a `User` resource with email (required, max 255) and status (allowed values)
 
 ---
 
+## Scalar API Reference
+
+Alongside Swagger UI, DataSurface can serve the **Scalar** API reference over the same OpenAPI document via the `DataSurface.Scalar` package. It is additive — Swagger and Scalar can run side by side, and Scalar needs no service registration of its own (only an exposed OpenAPI document).
+
+```csharp
+using DataSurface.Scalar;
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(o => builder.Services.AddDataSurfaceOpenApi(o));
+// ...
+app.MapDataSurfaceCrud();
+app.UseSwagger();            // serves /swagger/{documentName}/swagger.json
+app.MapDataSurfaceScalar();  // Scalar UI at /scalar
+```
+
+`MapDataSurfaceScalar` accepts optional arguments:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `endpointPrefix` | `"/scalar"` | Route the Scalar UI is served at |
+| `title` | `"DataSurface API"` | Reference UI title |
+| `openApiRoutePattern` | `"/swagger/{documentName}/swagger.json"` | OpenAPI JSON route (use `/openapi/{documentName}.json` for `Microsoft.AspNetCore.OpenApi`) |
+| `configure` | `null` | Callback to customize `ScalarOptions` (theme, layout, servers, auth) |
+
+---
+
 ## Schema Endpoint
 
 DataSurface provides a built-in JSON Schema endpoint for every resource:

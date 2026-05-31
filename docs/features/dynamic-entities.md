@@ -104,6 +104,8 @@ Represents a field within a dynamic entity:
 - Computed expressions and default values
 - Searchable flag
 
+> **Runtime parity note:** validation, filtering, sorting, and field projection are enforced for dynamic resources today. **Default values, computed fields, and full-text search (`?q=`) currently apply to EF/static resources only** — dynamic support for these is on the [roadmap](../roadmap.md).
+
 ---
 
 ## Admin API
@@ -182,6 +184,19 @@ When both static and dynamic resources are registered:
 2. `DataSurfaceCrudRouter` routes operations to the correct backend service
 3. Resource discovery (`GET /api/$resources`) lists both static and dynamic resources
 4. Schema endpoint (`GET /api/$schema/{route}`) works for both
+
+---
+
+## Security & Authorization
+
+Dynamic resources run through the same security pipeline as static resources:
+
+- **Per-operation policies** — when a dynamic resource's definition declares authorization policies, the dynamic catch-all enforces them via `IAuthorizationService`, returning `403 Forbidden` or a `401` challenge as appropriate.
+- **Resource & field authorization** — `IResourceAuthorizer` (instance-level access) and `IFieldAuthorizer` (field read/write) apply to dynamic records, including redaction of unauthorized fields from responses.
+- **Tenant isolation** — tenant filtering and auto-stamping apply: dynamic records are filtered to the caller's tenant and stamped with it on create.
+- **Audit logging** — `IAuditLogger` records dynamic CRUD operations.
+
+> The dynamic catch-all is opt-in: routes are only mapped when `MapDynamicCatchAll = true` (default `false`).
 
 ---
 

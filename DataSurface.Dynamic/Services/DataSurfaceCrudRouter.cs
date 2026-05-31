@@ -1,7 +1,9 @@
 using System.Text.Json.Nodes;
 using DataSurface.Core.Enums;
+using DataSurface.Dynamic.Contracts;
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Interfaces;
+using DataSurface.EFCore.Services;
 
 namespace DataSurface.Dynamic.Services;
 
@@ -15,14 +17,16 @@ public sealed class DataSurfaceCrudRouter : IDataSurfaceCrudService
     private readonly IDataSurfaceCrudService _dyn;
 
     /// <summary>
-    /// Creates a new router.
+    /// Creates a new router. Concrete dependency types are used deliberately: registering this
+    /// router as <see cref="IDataSurfaceCrudService"/> while injecting that same interface would
+    /// be a circular registration. The composite provider resolves both static and dynamic keys.
     /// </summary>
-    /// <param name="contracts">The contract provider used to resolve the resource backend.</param>
+    /// <param name="contracts">Composite provider used to resolve the resource backend.</param>
     /// <param name="ef">The EF Core CRUD service implementation.</param>
     /// <param name="dyn">The dynamic CRUD service implementation.</param>
     public DataSurfaceCrudRouter(
-        IResourceContractProvider contracts,
-        IDataSurfaceCrudService ef,
+        CompositeResourceContractProvider contracts,
+        EfDataSurfaceCrudService ef,
         DynamicDataSurfaceCrudService dyn)
     {
         _contracts = contracts;

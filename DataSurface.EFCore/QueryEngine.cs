@@ -2,6 +2,7 @@
 using DataSurface.Core.Contracts;
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Exceptions;
+using DataSurface.EFCore.Options;
 
 namespace DataSurface.EFCore;
 
@@ -15,6 +16,16 @@ namespace DataSurface.EFCore;
 /// </remarks>
 public sealed class EfCrudQueryEngine
 {
+    private readonly bool _strict;
+
+    /// <summary>
+    /// Creates a new query engine.
+    /// </summary>
+    /// <param name="options">EF Core options. When <see cref="DataSurfaceEfCoreOptions.StrictQuery"/> is
+    /// set, disallowed filter/sort fields are rejected instead of ignored.</param>
+    public EfCrudQueryEngine(DataSurfaceEfCoreOptions? options = null)
+        => _strict = options?.StrictQuery ?? false;
+
     /// <summary>
     /// Applies <paramref name="spec"/> to <paramref name="query"/> using the allowlists and limits defined in
     /// <paramref name="contract"/>.
@@ -102,7 +113,7 @@ public sealed class EfCrudQueryEngine
         return query.Where(lambda);
     }
 
-    private static IQueryable<TEntity> ApplyFilters<TEntity>(
+    private IQueryable<TEntity> ApplyFilters<TEntity>(
         IQueryable<TEntity> query,
         ResourceContract contract,
         IReadOnlyDictionary<string, string> filters)
@@ -114,7 +125,15 @@ public sealed class EfCrudQueryEngine
 
         foreach (var (apiField, raw) in filters)
         {
-            if (!allowed.Contains(apiField)) continue;
+            if (!allowed.Contains(apiField))
+            {
+                if (_strict)
+                    throw new CrudRequestValidationException(new Dictionary<string, string[]>
+                    {
+                        [apiField] = new[] { $"Field '{apiField}' is not filterable." }
+                    });
+                continue;
+            }
 
             var field = contract.Fields.FirstOrDefault(f => f.ApiName.Equals(apiField, StringComparison.OrdinalIgnoreCase));
             if (field == null) continue;
@@ -235,7 +254,7 @@ public sealed class EfCrudQueryEngine
         }
     }
 
-    private static IQueryable<TEntity> ApplySort<TEntity>(
+    private IQueryable<TEntity> ApplySort<TEntity>(
         IQueryable<TEntity> query,
         ResourceContract contract,
         string sort)
@@ -252,7 +271,15 @@ public sealed class EfCrudQueryEngine
             var desc = part.StartsWith("-");
             var apiName = desc ? part[1..] : part;
 
-            if (!allowed.Contains(apiName)) continue;
+            if (!allowed.Contains(apiName))
+            {
+                if (_strict)
+                    throw new CrudRequestValidationException(new Dictionary<string, string[]>
+                    {
+                        [apiName] = new[] { $"Field '{apiName}' is not sortable." }
+                    });
+                continue;
+            }
 
             var field = contract.Fields.FirstOrDefault(f => f.ApiName.Equals(apiName, StringComparison.OrdinalIgnoreCase));
             if (field == null) continue;

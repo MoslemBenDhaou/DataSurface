@@ -309,6 +309,38 @@ public class CachingTests : IDisposable
         r2.Items.Should().HaveCount(2, "cache should be bypassed when tenant isolation is active");
     }
 
+    // ────────────────────────────────────────────
+    //  B9: list invalidation must be visible across processes (shared backing store)
+    // ────────────────────────────────────────────
+
+    [Fact]
+    public async Task DistributedCache_ListInvalidation_IsVisibleAcrossInstances()
+    {
+        // Two cache instances over ONE backing store simulate two app processes/nodes.
+        var backing = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+        var opts = Options.Create(new DataSurfaceCacheOptions
+        {
+            EnableQueryCaching = true,
+            DefaultCacheDuration = TimeSpan.FromMinutes(5),
+            CacheKeyPrefix = "x:"
+        });
+        IQueryResultCache node1 = new DistributedQueryResultCache(backing, opts);
+        IQueryResultCache node2 = new DistributedQueryResultCache(backing, opts);
+
+        var key = node1.GenerateListCacheKey("SimpleItem", new QuerySpec(), null);
+        var paged = new PagedResult<JsonObject>(
+            new List<JsonObject> { new() { ["name"] = "A" } }, 1, 20, 1);
+
+        await node1.SetListAsync("SimpleItem", key, paged);
+        (await node2.GetListAsync("SimpleItem", key))
+            .Should().NotBeNull("the entry lives in the shared store and node2 should read it");
+
+        // node1 invalidates; with the old process-local key registry, node2 kept serving stale.
+        await node1.InvalidateResourceAsync("SimpleItem");
+        (await node2.GetListAsync("SimpleItem", key))
+            .Should().BeNull("invalidation must be visible to other instances");
+    }
+
     private sealed class FixedTenantResolver : ITenantResolver
     {
         private readonly string? _tenantId;

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.EFCore.Context;
 
 namespace DataSurface.Dynamic.Hooks;
@@ -10,22 +11,25 @@ namespace DataSurface.Dynamic.Hooks;
 public sealed class CrudResourceHookDispatcher
 {
     private readonly IServiceProvider _sp;
+    private readonly DataSurfaceFeatures _features;
     private readonly Lazy<IReadOnlyList<ICrudHookResource>> _allHooks;
 
     /// <summary>
     /// Creates a new dispatcher.
     /// </summary>
     /// <param name="sp">The service provider used to resolve hook implementations.</param>
-    public CrudResourceHookDispatcher(IServiceProvider sp)
+    /// <param name="features">Feature flags; resource hooks are only dispatched when <see cref="DataSurfaceFeatures.EnableHooks"/> is enabled.</param>
+    public CrudResourceHookDispatcher(IServiceProvider sp, DataSurfaceFeatures? features = null)
     {
         _sp = sp;
+        _features = features ?? new DataSurfaceFeatures();
         // Cache all hooks once at construction to avoid repeated enumeration
         _allHooks = new Lazy<IReadOnlyList<ICrudHookResource>>(() =>
             _sp.GetServices<ICrudHookResource>().OrderBy(h => h.Order).ToList());
     }
 
     private IEnumerable<ICrudHookResource> Hooks(string resourceKey)
-        => _allHooks.Value.Where(h => h.AppliesTo(resourceKey));
+        => _features.EnableHooks ? _allHooks.Value.Where(h => h.AppliesTo(resourceKey)) : [];
 
     /// <summary>
     /// Invokes hooks before a create operation.

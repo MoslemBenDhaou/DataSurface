@@ -18,7 +18,8 @@ public sealed class DataSurfaceHttpOptions
 
     // Dynamic resources mapped via catch-all routes: /api/d/{route}
     /// <summary>
-    /// Gets or sets whether to map dynamic resources through catch-all routes.
+    /// Gets or sets whether to map dynamic resources through catch-all routes. Disabled by default —
+    /// dynamic resources must be explicitly opted in by setting this to <see langword="true"/>.
     /// </summary>
     public bool MapDynamicCatchAll { get; set; } = false;
 
@@ -93,6 +94,13 @@ public sealed class DataSurfaceHttpOptions
     public bool EnableImportExport { get; set; } = false;
 
     /// <summary>
+    /// Gets or sets the maximum number of rows an export endpoint will materialize. Export loads the
+    /// whole result set into memory, so this bounds memory use; when the cap is reached the export is
+    /// truncated and an <c>X-Export-Truncated: true</c> response header is added. Default 100000.
+    /// </summary>
+    public int MaxExportRows { get; set; } = 100_000;
+
+    /// <summary>
     /// Gets or sets whether to enable rate limiting per resource/operation.
     /// Requires ASP.NET Core rate limiting middleware to be configured.
     /// </summary>
@@ -112,9 +120,4 @@ public sealed class DataSurfaceHttpOptions
     /// Gets or sets the header name for API key authentication.
     /// </summary>
     public string ApiKeyHeaderName { get; set; } = "X-Api-Key";
-
-    /// <summary>
-    /// Gets or sets whether to enable webhook publishing for CRUD events.
-    /// </summary>
-    public bool EnableWebhooks { get; set; } = false;
 }

@@ -6,14 +6,7 @@ DataSurface can publish events when CRUD operations occur. Webhooks are useful f
 
 ## Setup
 
-### Enable Webhooks
-
-```csharp
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnableWebhooks = true
-});
-```
+Webhooks activate automatically when an `IWebhookPublisher` is registered in DI — there is no flag to toggle. Register a publisher and CRUD mutations are published to it.
 
 ### Implement a Publisher
 
@@ -96,26 +89,6 @@ The `WebhookSubscription` record defines how subscriptions are configured:
 - Failures are logged but **do not fail** the CRUD operation
 - The CRUD operation completes successfully regardless of webhook delivery status
 - Implement retry logic, dead-letter queues, or circuit breakers in your `IWebhookPublisher` as needed
-
----
-
-## Feature Flag
-
-Webhooks are opt-in:
-
-```csharp
-// Via HTTP options
-app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
-{
-    EnableWebhooks = true
-});
-
-// Via feature flags (for the Full preset, webhooks are enabled)
-opt.Features = DataSurfaceFeatures.Full;
-
-// Or individually
-opt.Features.EnableWebhooks = true;
-```
 
 ---
 

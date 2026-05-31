@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DataSurface.Admin.Dtos;
 using DataSurface.Admin.Validation;
 using DataSurface.Dynamic.Entities;
@@ -75,6 +76,12 @@ public sealed class DynamicMetadataAdminService
             existing = new DsEntityDefRow { EntityKey = dto.EntityKey };
             _db.Add(existing);
         }
+        else if (dto.UpdatedAt is { } clientVersion)
+        {
+            // Optimistic concurrency: make EF compare against the version the client last read,
+            // so two stale edits cannot silently overwrite each other (throws on conflict).
+            _db.Entry(existing).Property(x => x.UpdatedAt).OriginalValue = clientVersion;
+        }
 
         Apply(dto, existing);
 
@@ -135,6 +142,8 @@ public sealed class DynamicMetadataAdminService
     /// <returns><c>true</c> if the entity existed and was deleted; otherwise <c>false</c>.</returns>
     public async Task<bool> DeleteEntityAsync(string entityKey, CancellationToken ct)
     {
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
         var row = await _db.Set<DsEntityDefRow>()
             .Include(x => x.Properties)
             .Include(x => x.Relations)
@@ -146,6 +155,7 @@ public sealed class DynamicMetadataAdminService
         _db.RemoveRange(row.Relations);
         _db.Remove(row);
         await _db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return true;
     }
 
@@ -195,6 +205,12 @@ public sealed class DynamicMetadataAdminService
         row.EnableCreate = dto.EnableCreate;
         row.EnableUpdate = dto.EnableUpdate;
         row.EnableDelete = dto.EnableDelete;
+
+        row.TenantFieldName = dto.TenantFieldName;
+        row.TenantFieldApiName = dto.TenantFieldApiName;
+        row.TenantClaimType = dto.TenantClaimType;
+        row.TenantRequired = dto.TenantRequired;
+        row.PoliciesJson = dto.Policies is { Count: > 0 } ? JsonSerializer.Serialize(dto.Policies) : null;
     }
 
     private static AdminEntityDefDto MapToDto(DsEntityDefRow row)
@@ -214,6 +230,14 @@ public sealed class DynamicMetadataAdminService
             EnableCreate = row.EnableCreate,
             EnableUpdate = row.EnableUpdate,
             EnableDelete = row.EnableDelete,
+            TenantFieldName = row.TenantFieldName,
+            TenantFieldApiName = row.TenantFieldApiName,
+            TenantClaimType = row.TenantClaimType,
+            TenantRequired = row.TenantRequired,
+            Policies = string.IsNullOrWhiteSpace(row.PoliciesJson)
+                ? null
+                : JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PoliciesJson),
+            UpdatedAt = row.UpdatedAt,
             Properties = row.Properties.OrderBy(p => p.ApiName).Select(p => new AdminPropertyDefDto
             {
                 Id = p.Id,

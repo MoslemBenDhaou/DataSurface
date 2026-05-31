@@ -35,6 +35,12 @@ public sealed class DsDynamicRecordRow
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     /// <summary>
+    /// Gets or sets the tenant value this record belongs to, or null if the resource is not
+    /// tenant-scoped. Enforces tenant isolation at the storage layer.
+    /// </summary>
+    public string? TenantValue { get; set; }
+
+    /// <summary>
     /// Gets or sets the row-version concurrency token.
     /// </summary>
     public byte[] RowVersion { get; set; } = default!;

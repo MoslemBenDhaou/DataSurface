@@ -17,13 +17,14 @@ builder.Services.AddDataSurfaceEfCore(opt =>
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
+| `Features` | `DataSurfaceFeatures` | `Minimal` | Feature flags — see [Feature Flags](../features/feature-flags.md) |
 | `AssembliesToScan` | `Assembly[]` | `[]` | Assemblies to scan for `[CrudResource]` classes |
-| `AutoRegisterCrudEntities` | `bool` | `true` | Auto-register discovered entities in DbContext |
-| `EnableSoftDeleteFilter` | `bool` | `true` | Apply `ISoftDelete` global query filter |
-| `EnableRowVersionConvention` | `bool` | `true` | Configure `byte[]` RowVersion as EF concurrency token |
-| `EnableTimestampConvention` | `bool` | `true` | Auto-populate `CreatedAt`/`UpdatedAt` for `ITimestamped` |
+| `AutoRegisterCrudEntities` | `bool` | `false` | Auto-register discovered resource types in the EF model |
+| `EnableSoftDeleteFilter` | `bool` | `false` | Apply `ISoftDelete` global query filter |
+| `EnableRowVersionConvention` | `bool` | `false` | Configure `byte[]` RowVersion as EF concurrency token |
+| `EnableTimestampConvention` | `bool` | `false` | Auto-populate `CreatedAt`/`UpdatedAt` for `ITimestamped` |
 | `UseCamelCaseApiNames` | `bool` | `true` | Convert property names to camelCase for API names |
-| `Features` | `DataSurfaceFeatures` | `Standard` | Feature flags — see [Feature Flags](../features/feature-flags.md) |
+| `StrictQuery` | `bool` | `false` | Reject filter/sort on non-allowlisted fields with HTTP 400 instead of silently ignoring them |
 | `ContractBuilderOptions` | `ContractBuilderOptions` | *(see below)* | Fine-tune contract generation |
 
 ### ContractBuilderOptions
@@ -49,22 +50,24 @@ app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 |----------|------|---------|-------------|
 | `ApiPrefix` | `string` | `"/api"` | Base route prefix for all endpoints |
 | `MapStaticResources` | `bool` | `true` | Map routes for static EF Core resources |
-| `MapDynamicCatchAll` | `bool` | `false` | Map `/api/d/{route}` for dynamic resources |
+| `MapDynamicCatchAll` | `bool` | `false` | Map `/api/d/{route}` for dynamic resources (opt-in) |
 | `DynamicPrefix` | `string` | `"/d"` | Route prefix for dynamic resources |
-| `MapResourceDiscoveryEndpoint` | `bool` | `true` | Enable `GET /api/$resources` |
+| `MapResourceDiscoveryEndpoint` | `bool` | `false` | Enable `GET /api/$resources` |
 | `RequireAuthorizationByDefault` | `bool` | `false` | Require auth on all endpoints |
 | `DefaultPolicy` | `string?` | `null` | Default ASP.NET Core authorization policy |
-| `EnableEtags` | `bool` | `true` | Include ETag headers in responses |
+| `EnableEtags` | `bool` | `false` | Include ETag headers in responses |
 | `EnableConditionalGet` | `bool` | `false` | Support `If-None-Match` → 304 responses |
-| `CacheControlMaxAgeSeconds` | `int?` | `null` | Set `Cache-Control: max-age=N` header |
+| `CacheControlMaxAgeSeconds` | `int` | `0` | `Cache-Control: max-age=N` for GET responses (0 disables the header) |
 | `ThrowOnRouteCollision` | `bool` | `false` | Fail startup on duplicate routes |
 | `EnablePutForFullUpdate` | `bool` | `false` | Enable PUT endpoints for full replacement |
+| `EnableBulkOperations` | `bool` | `false` | Map bulk endpoints (`POST /api/{resource}/bulk`) |
+| `EnableStreaming` | `bool` | `false` | Map streaming endpoints (`GET /api/{resource}/stream`) |
 | `EnableImportExport` | `bool` | `false` | Enable import/export endpoints |
+| `MaxExportRows` | `int` | `100000` | Max rows an export will materialize; beyond it the response is truncated and `X-Export-Truncated: true` is returned |
 | `EnableRateLimiting` | `bool` | `false` | Enable ASP.NET Core rate limiting |
 | `RateLimitingPolicy` | `string?` | `null` | Rate limiting policy name |
 | `EnableApiKeyAuth` | `bool` | `false` | Enable API key authentication |
 | `ApiKeyHeaderName` | `string` | `"X-Api-Key"` | Header name for API key |
-| `EnableWebhooks` | `bool` | `false` | Enable webhook publishing |
 
 ---
 

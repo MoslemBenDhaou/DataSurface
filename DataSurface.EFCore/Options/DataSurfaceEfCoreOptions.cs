@@ -13,7 +13,7 @@ public sealed class DataSurfaceEfCoreOptions
     /// Use <see cref="DataSurfaceFeatures.Minimal"/>, <see cref="DataSurfaceFeatures.Standard"/>,
     /// or <see cref="DataSurfaceFeatures.Full"/> presets, or configure individual features.
     /// </summary>
-    public DataSurfaceFeatures Features { get; set; } = DataSurfaceFeatures.Minimal;
+    public DataSurfaceFeatures Features { get; set; } = new();
 
     /// <summary>
     /// When <see langword="true"/>, automatically registers resource CLR types with the EF model based on
@@ -42,6 +42,13 @@ public sealed class DataSurfaceEfCoreOptions
     /// When <see langword="true"/>, uses camelCase API names consistent with the Core contract builder conventions.
     /// </summary>
     public bool UseCamelCaseApiNames { get; set; } = true;          // consistent with Core builder
+
+    /// <summary>
+    /// When <see langword="true"/>, list queries reject (with a validation error → HTTP 400) any filter
+    /// or sort field that is not in the resource's filterable/sortable allowlist, instead of silently
+    /// ignoring it. Off by default (forgiving), which is friendlier but can mask client mistakes.
+    /// </summary>
+    public bool StrictQuery { get; set; } = false;
 
     // Discovery
     /// <summary>

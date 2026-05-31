@@ -4,6 +4,7 @@ using DataSurface.Dynamic.Hooks;
 using DataSurface.Dynamic.Indexing;
 using DataSurface.Dynamic.Services;
 using DataSurface.Dynamic.Stores;
+using DataSurface.EFCore.Interfaces;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DataSurface.Dynamic.DI;
@@ -37,10 +38,18 @@ public static class ServiceCollectionExtensions
 
         services.AddScoped<DynamicDataSurfaceCrudService>();
 
-        // Composite provider: you can register this as the main IResourceContractProvider
-        // only after static provider is registered too.
+        // Composite provider, registered as THE app-wide IResourceContractProvider so that every
+        // consumer (bulk/streaming validation, dynamic expand targets, the router) resolves both
+        // static and dynamic resource keys. Overrides the static-only alias from AddDataSurfaceEfCore.
         services.AddScoped<CompositeResourceContractProvider>();
+        services.AddScoped<IResourceContractProvider>(sp => sp.GetRequiredService<CompositeResourceContractProvider>());
 
-        return services; 
+        // Route IDataSurfaceCrudService by backend (EF vs dynamic). This overrides the EF-only
+        // alias registered by AddDataSurfaceEfCore so that dynamic resources reached via the HTTP
+        // catch-all (and bulk/streaming) execute on the dynamic service — applying tenant/security.
+        services.AddScoped<DataSurfaceCrudRouter>();
+        services.AddScoped<IDataSurfaceCrudService>(sp => sp.GetRequiredService<DataSurfaceCrudRouter>());
+
+        return services;
     }
 }

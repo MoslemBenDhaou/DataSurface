@@ -1,3 +1,4 @@
+using DataSurface.Core;
 using DataSurface.EFCore.Context;
 using DataSurface.EFCore.Interfaces;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,14 +11,17 @@ namespace DataSurface.EFCore.Services;
 public sealed class CrudHookDispatcher
 {
     private readonly IServiceProvider _sp;
+    private readonly DataSurfaceFeatures _features;
 
     /// <summary>
     /// Creates a new dispatcher.
     /// </summary>
     /// <param name="sp">The service provider used to resolve hook implementations.</param>
-    public CrudHookDispatcher(IServiceProvider sp)
+    /// <param name="features">Feature flags; hooks are only dispatched when <see cref="DataSurfaceFeatures.EnableHooks"/> is enabled.</param>
+    public CrudHookDispatcher(IServiceProvider sp, DataSurfaceFeatures? features = null)
     {
         _sp = sp;
+        _features = features ?? new DataSurfaceFeatures();
     }
 
     /// <summary>
@@ -39,7 +43,7 @@ public sealed class CrudHookDispatcher
     }
 
     private IReadOnlyList<ICrudHook> ResolveGlobalHooks()
-        => _sp.GetServices<ICrudHook>().OrderBy(h => h.Order).ToList();
+        => _features.EnableHooks ? _sp.GetServices<ICrudHook>().OrderBy(h => h.Order).ToList() : [];
 
     /// <summary>
     /// Invokes typed hooks before a create operation.
@@ -50,6 +54,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task BeforeCreateAsync<TEntity>(TEntity entity, System.Text.Json.Nodes.JsonObject body, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.BeforeCreateAsync(entity, body, ctx);
     }
@@ -62,6 +67,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task AfterCreateAsync<TEntity>(TEntity entity, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.AfterCreateAsync(entity, ctx);
     }
@@ -75,6 +81,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task BeforeUpdateAsync<TEntity>(TEntity entity, System.Text.Json.Nodes.JsonObject patch, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.BeforeUpdateAsync(entity, patch, ctx);
     }
@@ -87,6 +94,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task AfterUpdateAsync<TEntity>(TEntity entity, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.AfterUpdateAsync(entity, ctx);
     }
@@ -99,6 +107,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task BeforeDeleteAsync<TEntity>(TEntity entity, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.BeforeDeleteAsync(entity, ctx);
     }
@@ -111,6 +120,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task AfterDeleteAsync<TEntity>(TEntity entity, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.AfterDeleteAsync(entity, ctx);
     }
@@ -123,6 +133,7 @@ public sealed class CrudHookDispatcher
     /// <param name="ctx">The hook context.</param>
     public async Task AfterReadAsync<TEntity>(TEntity entity, CrudHookContext ctx)
     {
+        if (!_features.EnableHooks) return;
         var hooks = _sp.GetServices<ICrudHook<TEntity>>().OrderBy(h => h.Order);
         foreach (var h in hooks) await h.AfterReadAsync(entity, ctx);
     }

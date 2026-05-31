@@ -46,7 +46,16 @@ public interface IQueryResultCache
     /// <param name="result">The result to cache.</param>
     /// <param name="duration">Optional cache duration override.</param>
     /// <param name="ct">Cancellation token.</param>
-    Task SetListAsync(string resourceKey, string cacheKey, PagedResult<JsonObject> result, TimeSpan? duration = null, CancellationToken ct = default);
+    Task SetListAsync(string resourceKey, string cacheKey, PagedResult<JsonObject> result, TimeSpan? duration = null, string? observedVersion = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets (initializing if necessary) the current list-cache version for a resource. Capture this
+    /// before a DB read and pass it to <see cref="SetListAsync"/> as <c>observedVersion</c> so a
+    /// concurrent invalidation between the read and the write-back prevents caching a stale result.
+    /// </summary>
+    /// <param name="resourceKey">The resource key.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<string> GetListVersionAsync(string resourceKey, CancellationToken ct = default);
 
     /// <summary>
     /// Gets a cached single entity result.

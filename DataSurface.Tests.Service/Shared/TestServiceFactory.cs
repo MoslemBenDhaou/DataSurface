@@ -1,4 +1,6 @@
+using DataSurface.Core;
 using DataSurface.Core.Contracts;
+using DataSurface.Core.Webhooks;
 using DataSurface.EFCore;
 using DataSurface.EFCore.Caching;
 using DataSurface.EFCore.Context;
@@ -6,6 +8,7 @@ using DataSurface.EFCore.Interfaces;
 using DataSurface.EFCore.Mapper;
 using DataSurface.EFCore.Observability;
 using DataSurface.EFCore.Providers;
+using DataSurface.EFCore.Queries;
 using DataSurface.EFCore.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -59,7 +62,10 @@ public sealed class TestServiceFactory : IDisposable
             logger: _sp.GetRequiredService<ILogger<EfDataSurfaceCrudService>>(),
             security: _sp.GetService<CrudSecurityDispatcher>(),
             metrics: _sp.GetService<DataSurfaceMetrics>(),
-            cache: _sp.GetService<IQueryResultCache>());
+            cache: _sp.GetService<IQueryResultCache>(),
+            webhooks: _sp.GetService<IWebhookPublisher>(),
+            compiledQueries: _sp.GetService<CompiledQueryCache>(),
+            features: _sp.GetService<DataSurfaceFeatures>());
     }
 
     public void Dispose()

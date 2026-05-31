@@ -29,77 +29,77 @@ public sealed class DataSurfaceFeatures
     /// <summary>
     /// Enable computed field evaluation at read time.
     /// </summary>
-    public bool EnableComputedFields { get; set; } = false;
+    public bool EnableComputedFields { get; set; } = true;
 
     /// <summary>
     /// Enable field projection via ?fields= query parameter.
     /// </summary>
-    public bool EnableFieldProjection { get; set; } = false;
+    public bool EnableFieldProjection { get; set; } = true;
 
     // ============ SECURITY ============
 
     /// <summary>
     /// Enable tenant isolation via [CrudTenant] attribute.
     /// </summary>
-    public bool EnableTenantIsolation { get; set; } = false;
+    public bool EnableTenantIsolation { get; set; } = true;
 
     /// <summary>
     /// Enable row-level security via IResourceFilter.
     /// </summary>
-    public bool EnableRowLevelSecurity { get; set; } = false;
+    public bool EnableRowLevelSecurity { get; set; } = true;
 
     /// <summary>
     /// Enable resource-level authorization via IResourceAuthorizer.
     /// </summary>
-    public bool EnableResourceAuthorization { get; set; } = false;
+    public bool EnableResourceAuthorization { get; set; } = true;
 
     /// <summary>
     /// Enable field-level authorization via IFieldAuthorizer.
     /// </summary>
-    public bool EnableFieldAuthorization { get; set; } = false;
+    public bool EnableFieldAuthorization { get; set; } = true;
 
     // ============ OBSERVABILITY ============
 
     /// <summary>
     /// Enable audit logging via IAuditLogger.
     /// </summary>
-    public bool EnableAuditLogging { get; set; } = false;
+    public bool EnableAuditLogging { get; set; } = true;
 
     /// <summary>
     /// Enable OpenTelemetry metrics via DataSurfaceMetrics.
     /// </summary>
-    public bool EnableMetrics { get; set; } = false;
+    public bool EnableMetrics { get; set; } = true;
 
     /// <summary>
     /// Enable distributed tracing via DataSurfaceTracing.
     /// </summary>
-    public bool EnableTracing { get; set; } = false;
+    public bool EnableTracing { get; set; } = true;
 
     // ============ CACHING ============
 
     /// <summary>
     /// Enable query result caching via IQueryResultCache.
     /// </summary>
-    public bool EnableQueryCaching { get; set; } = false;
+    public bool EnableQueryCaching { get; set; } = true;
 
     // ============ HOOKS & OVERRIDES ============
 
     /// <summary>
     /// Enable lifecycle hooks via ICrudHook and ICrudHook&lt;T&gt;.
     /// </summary>
-    public bool EnableHooks { get; set; } = false;
+    public bool EnableHooks { get; set; } = true;
 
     /// <summary>
     /// Enable CRUD operation overrides via CrudOverrideRegistry.
     /// </summary>
-    public bool EnableOverrides { get; set; } = false;
+    public bool EnableOverrides { get; set; } = true;
 
     // ============ INTEGRATION ============
 
     /// <summary>
     /// Enable webhook publishing via IWebhookPublisher.
     /// </summary>
-    public bool EnableWebhooks { get; set; } = false;
+    public bool EnableWebhooks { get; set; } = true;
 
     // ============ PRESETS ============
 
@@ -170,8 +170,10 @@ public sealed class DataSurfaceFeatures
     };
 
     /// <summary>
-    /// Creates a new instance with minimal features enabled by default (field validation and default values only).
-    /// Use <see cref="Standard"/> or <see cref="Full"/> presets for more features.
+    /// Creates a new instance with all features <em>permitted</em> (every flag <see langword="true"/>). A
+    /// feature still only runs when its wiring is present (service registered / attribute applied); set a
+    /// flag to <see langword="false"/> to force it off even when wired. Start from <see cref="Minimal"/> or
+    /// <see cref="Standard"/> for a more restrictive set.
     /// </summary>
     public DataSurfaceFeatures() { }
 

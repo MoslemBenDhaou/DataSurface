@@ -42,15 +42,14 @@ app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
     EnablePutForFullUpdate = false,
     EnableImportExport = false,
     EnableRateLimiting = false,
-    EnableApiKeyAuth = false,
-    EnableWebhooks = false
+    EnableApiKeyAuth = false
 });
 ```
 
 Key settings:
 - **`ApiPrefix`** — Base route prefix for all endpoints
 - **`MapDynamicCatchAll`** — Whether to enable `/api/d/{route}` for dynamic resources
-- **Feature toggles** — PUT, import/export, rate limiting, API keys, webhooks
+- **Feature toggles** — PUT, import/export, rate limiting, API keys
 
 ---
 
@@ -85,16 +84,16 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 
 ## Feature Flags
 
-Selectively enable or disable DataSurface capabilities using `DataSurfaceFeatures`. Three presets are available:
+Feature flags are an **AND-gate kill-switch**: a feature runs only when its flag is enabled **and** its wiring (service/attribute) is present. Flags **default to enabled**, so registering the dependency is enough — set a flag to `false` to force a feature off even when wired. Presets are opt-in lockdowns:
 
-| Preset | Description |
-|--------|-------------|
-| `Minimal` | Core CRUD + validation only |
-| `Standard` | Core + security + observability (default) |
-| `Full` | All features including webhooks |
+| Preset | What it permits |
+|--------|-----------------|
+| *(default)* | Every feature (wire what you need) |
+| `Standard` | Everything except webhooks |
+| `Minimal` | Only field validation + default values |
 
 ```csharp
-opt.Features = DataSurfaceFeatures.Standard;
+opt.Features = DataSurfaceFeatures.Minimal; // lock down; omit for "permit everything"
 ```
 
 Or customize individual flags:

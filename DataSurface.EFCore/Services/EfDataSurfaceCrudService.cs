@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using DataSurface.Core.Webhooks;
@@ -11,6 +12,7 @@ using DataSurface.EFCore.Exceptions;
 using DataSurface.EFCore.Interfaces;
 using DataSurface.EFCore.Mapper;
 using DataSurface.EFCore.Observability;
+using DataSurface.EFCore.Queries;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -33,6 +35,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly DataSurfaceMetrics? _metrics;
     private readonly IQueryResultCache? _cache;
     private readonly IWebhookPublisher? _webhooks;
+    private readonly CompiledQueryCache? _compiledQueries;
+    private readonly DataSurfaceFeatures _features;
 
     /// <summary>
     /// Creates a new CRUD service.
@@ -49,6 +53,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     /// <param name="metrics">Optional metrics recorder for observability.</param>
     /// <param name="cache">Optional query result cache for read operations.</param>
     /// <param name="webhooks">Optional webhook publisher for CRUD event notifications.</param>
+    /// <param name="compiledQueries">Optional compiled-query cache used to speed up simple by-id reads.</param>
+    /// <param name="features">Optional feature flags; a feature runs only when its flag is enabled and its wiring is present.</param>
     public EfDataSurfaceCrudService(
         DbContext db,
         IResourceContractProvider contracts,
@@ -61,7 +67,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         CrudSecurityDispatcher? security = null,
         DataSurfaceMetrics? metrics = null,
         IQueryResultCache? cache = null,
-        IWebhookPublisher? webhooks = null)
+        IWebhookPublisher? webhooks = null,
+        CompiledQueryCache? compiledQueries = null,
+        DataSurfaceFeatures? features = null)
     {
         _db = db;
         _contracts = contracts;
@@ -72,9 +80,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _overrides = overrides;
         _logger = logger;
         _security = security;
-        _metrics = metrics;
-        _cache = cache;
-        _webhooks = webhooks;
+        _features = features ?? new DataSurfaceFeatures();
+        // Feature flags are an AND-gate: these capabilities run only when the flag is on AND the dependency
+        // is registered. Null the dependency out when its flag is off, so the existing null-checks skip it.
+        _metrics = _features.EnableMetrics ? metrics : null;
+        _cache = _features.EnableQueryCaching ? cache : null;
+        _webhooks = _features.EnableWebhooks ? webhooks : null;
+        _compiledQueries = compiledQueries;
     }
 
     /// <inheritdoc />
@@ -90,7 +102,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         string resourceKey, QuerySpec spec, ExpandSpec? expand = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List) : null;
         DataSurfaceTracing.AddQueryParameters(activity, spec.Page, spec.PageSize, spec.Filters?.Count ?? 0, string.IsNullOrEmpty(spec.Sort) ? 0 : spec.Sort.Split(',').Length);
         DataSurfaceTracing.AddExpandInfo(activity, expand?.Expand);
 
@@ -102,6 +114,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // Check cache only when no per-user security features are active (to avoid serving cached data across users)
         var useCache = _cache is not null && !HasPerUserSecurity(c);
         string? cacheKey = null;
+        string? observedListVersion = null;
         if (useCache)
         {
             cacheKey = _cache!.GenerateListCacheKey(resourceKey, spec, expand);
@@ -114,6 +127,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 _logger.LogDebug("List {Resource} cache hit, returned {Count}/{Total} items", resourceKey, cached.Items.Count, cached.Total);
                 return cached;
             }
+
+            // Observe the list-cache version BEFORE querying so a concurrent invalidation between now
+            // and the write-back prevents caching a now-stale result (stale-fill guard).
+            observedListVersion = await _cache.GetListVersionAsync(resourceKey, ct);
         }
 
         var hookCtx = NewHookCtx(c, CrudOperation.List);
@@ -121,7 +138,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<ListOverride>(c.ResourceKey, CrudOperation.List, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<ListOverride>(c.ResourceKey, CrudOperation.List, out var ov))
         {
             var result = await ov!(c, spec, expand, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
@@ -141,6 +158,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // Apply tenant isolation filter
         if (_security is not null && c.Tenant is not null)
             filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
+
+        // Exclude soft-deleted rows from reads (ISoftDelete) by default, and read no-tracking.
+        filteredSet = AsNoTracking(ApplySoftDeleteFilter(filteredSet, clrType));
 
         var baseQuery = ApplyExpand(filteredSet, c, expand);
         var filtered = ApplyFilterSpec(baseQuery, clrType, c, spec);
@@ -179,7 +199,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         // Store in cache (only when security is not active)
         if (useCache && cacheKey is not null)
-            await _cache!.SetListAsync(resourceKey, cacheKey, pagedResult, duration: null, ct);
+            await _cache!.SetListAsync(resourceKey, cacheKey, pagedResult, duration: null, observedVersion: observedListVersion, ct: ct);
 
         return pagedResult;
     }
@@ -197,7 +217,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         string resourceKey, object id, ExpandSpec? expand = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Get, id);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Get, id) : null;
         DataSurfaceTracing.AddExpandInfo(activity, expand?.Expand);
 
         _logger.LogDebug("Get {Resource} id={Id}", resourceKey, id);
@@ -205,8 +225,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Get);
 
-        // Check cache only when no per-user security features are active (to avoid serving cached data across users)
-        var useCache = _cache is not null && !HasPerUserSecurity(c);
+        // Check cache only when no per-user security features are active (to avoid serving cached data across users).
+        // Also bypass when the caller requests relation expansions: the get-cache key is only
+        // (resource, id), so a cached non-expanded shape must not be served to an expand request.
+        // Default expansions are constant per resource, so a request without expand is cacheable.
+        var requestsExpand = expand is not null && expand.Expand.Count > 0;
+        var useCache = _cache is not null && !HasPerUserSecurity(c) && !requestsExpand;
         if (useCache)
         {
             var cached = await _cache!.GetAsync(resourceKey, id, ct);
@@ -225,7 +249,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<GetOverride>(c.ResourceKey, CrudOperation.Get, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<GetOverride>(c.ResourceKey, CrudOperation.Get, out var ov))
         {
             var result = await ov!(c, id, expand, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
@@ -237,18 +261,39 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var (clrType, set) = ResolveSet(c);
 
-        // Apply row-level security filter
-        var filteredSet = _security is not null 
-            ? _security.ApplyResourceFilter(set, clrType, c) 
-            : set;
+        // Fast path: a by-id read that needs none of the per-request dynamic query composition
+        // (no row-level filter, no tenant scoping, no soft-delete predicate, no relation expansion)
+        // collapses to a plain primary-key lookup. Serve it from a cached compiled async (no-tracking)
+        // query instead of rebuilding the key-lookup expression tree on every call. When any of those
+        // features apply the query shape varies and cannot be precompiled, so use the dynamic path.
+        object? entity;
+        var expandsRelations = (expand is not null && expand.Expand.Count > 0) || c.Read.DefaultExpand.Count > 0;
+        if (_compiledQueries is not null
+            && !HasPerUserSecurity(c)
+            && !expandsRelations
+            && !typeof(ISoftDelete).IsAssignableFrom(clrType))
+        {
+            var invoker = GetCompiledFindByIdInvoker(clrType, c);
+            entity = await invoker(_compiledQueries, _db, id, c.Key.Name, ct);
+        }
+        else
+        {
+            // Apply row-level security filter
+            var filteredSet = _security is not null
+                ? _security.ApplyResourceFilter(set, clrType, c)
+                : set;
 
-        // Apply tenant isolation filter
-        if (_security is not null && c.Tenant is not null)
-            filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
+            // Apply tenant isolation filter
+            if (_security is not null && c.Tenant is not null)
+                filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
 
-        var q = ApplyExpand(filteredSet, c, expand);
+            // Exclude soft-deleted rows from reads (ISoftDelete) by default, and read no-tracking.
+            filteredSet = AsNoTracking(ApplySoftDeleteFilter(filteredSet, clrType));
 
-        var entity = await FindByIdAsync(q, clrType, c, id, ct);
+            var q = ApplyExpand(filteredSet, c, expand);
+
+            entity = await FindByIdAsync(q, clrType, c, id, ct);
+        }
         if (entity is null)
         {
             await _hooks.AfterGlobalAsync(hookCtx);
@@ -298,14 +343,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task<JsonObject> CreateAsync(string resourceKey, JsonObject body, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Create);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Create) : null;
 
         _logger.LogDebug("Create {Resource}", resourceKey);
 
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Create);
 
-        ValidateBody(c, CrudOperation.Create, body);
+        ValidateBody(c, CrudOperation.Create, body, _features.EnableFieldValidation);
 
         // Validate field-level write authorization
         _security?.ValidateFieldWriteAuthorization(c, body, CrudOperation.Create);
@@ -315,7 +360,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<CreateOverride>(c.ResourceKey, CrudOperation.Create, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<CreateOverride>(c.ResourceKey, CrudOperation.Create, out var ov))
         {
             var result = await ov!(c, body, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
@@ -378,13 +423,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task<JsonObject> UpdateAsync(string resourceKey, object id, JsonObject patch, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Update, id);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Update, id) : null;
 
         _logger.LogDebug("Update {Resource} id={Id}", resourceKey, id);
 
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.Update);
-        ValidateBody(c, CrudOperation.Update, patch);
+        ValidateBody(c, CrudOperation.Update, patch, _features.EnableFieldValidation);
 
         // Validate field-level write authorization
         _security?.ValidateFieldWriteAuthorization(c, patch, CrudOperation.Update);
@@ -394,7 +439,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<UpdateOverride>(c.ResourceKey, CrudOperation.Update, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<UpdateOverride>(c.ResourceKey, CrudOperation.Update, out var ov))
         {
             var result = await ov!(c, id, patch, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
@@ -469,7 +514,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     public async Task DeleteAsync(string resourceKey, object id, CrudDeleteSpec? deleteSpec = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Delete, id);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Delete, id) : null;
         activity?.SetTag("datasurface.hard_delete", deleteSpec?.HardDelete ?? false);
 
         _logger.LogDebug("Delete {Resource} id={Id} hard={Hard}", resourceKey, id, deleteSpec?.HardDelete ?? false);
@@ -482,7 +527,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _hooks.BeforeGlobalAsync(hookCtx);
 
-        if (_overrides.TryGet<DeleteOverride>(c.ResourceKey, CrudOperation.Delete, out var ov))
+        if (_features.EnableOverrides && _overrides.TryGet<DeleteOverride>(c.ResourceKey, CrudOperation.Delete, out var ov))
         {
             await ov!(c, id, deleteSpec, svcCtx, ct);
             await _hooks.AfterGlobalAsync(hookCtx);
@@ -646,7 +691,9 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     {
         var m = typeof(EfCrudMapper).GetMethod(nameof(EfCrudMapper.ApplyUpdate))!
             .MakeGenericMethod(entity.GetType());
-        m.Invoke(_mapper, new object[] { entity, patch, c, _db });
+        // DoNotWrapExceptions: let domain exceptions (validation/concurrency) propagate
+        // unwrapped instead of being hidden inside TargetInvocationException.
+        m.Invoke(_mapper, System.Reflection.BindingFlags.DoNotWrapExceptions, null, new object[] { entity, patch, c, _db }, null);
     }
 
     private Task InvokeTypedBeforeDelete(object entity, CrudHookContext ctx)
@@ -674,10 +721,25 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
     private bool HasPerUserSecurity(ResourceContract c)
     {
-        if (c.Tenant is not null) return true;
+        // Only treat a security mechanism as "per-user" (cache / fast-path unsafe) when its feature flag is
+        // actually enabled — a flag-disabled mechanism is not applied, so caching stays safe and the
+        // optimization need not be suppressed. These checks must stay aligned with the gates in
+        // CrudSecurityDispatcher (which enforce the same flags).
+        if (c.Tenant is not null && _features.EnableTenantIsolation) return true;
         if (_security is null) return false;
-        if (_sp.GetService(typeof(IFieldAuthorizer)) is not null) return true;
-        if (((IEnumerable<IResourceFilter>)_sp.GetService(typeof(IEnumerable<IResourceFilter>))!).Any()) return true;
+        if (_features.EnableFieldAuthorization && _sp.GetService(typeof(IFieldAuthorizer)) is not null) return true;
+        if (_features.EnableRowLevelSecurity
+            && ((IEnumerable<IResourceFilter>)_sp.GetService(typeof(IEnumerable<IResourceFilter>))!).Any()) return true;
+        // Typed row filter / instance authorizer for THIS entity type — these run per request, so a cached
+        // result or the compiled by-id fast path must not short-circuit them.
+        var clrType = TryResolveClrType(c);
+        if (clrType is null) return true; // can't introspect — assume per-user security; use the full path
+        if (_features.EnableRowLevelSecurity
+            && _sp.GetService(typeof(IResourceFilter<>).MakeGenericType(clrType)) is not null) return true;
+        if (_features.EnableResourceAuthorization
+            && _sp.GetService(typeof(IResourceAuthorizer<>).MakeGenericType(clrType)) is not null) return true;
+        if (_features.EnableResourceAuthorization
+            && _sp.GetService(typeof(IResourceAuthorizer)) is not null) return true;
         return false;
     }
 
@@ -696,17 +758,26 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
     private (Type clrType, IQueryable set) ResolveSet(ResourceContract c)
     {
-        var clrType = _typeCache.GetOrAdd(c.ResourceKey, key =>
-            AppDomain.CurrentDomain.GetAssemblies()
-                .SelectMany(a => SafeGetTypes(a))
-                .FirstOrDefault(t => t.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Cannot resolve CLR type for resourceKey '{key}'."));
+        var clrType = ResolveClrType(c);
 
         var set = (IQueryable)typeof(DbContext).GetMethod(nameof(DbContext.Set), Type.EmptyTypes)!
             .MakeGenericMethod(clrType)
             .Invoke(_db, null)!;
 
         return (clrType, set);
+    }
+
+    private Type ResolveClrType(ResourceContract c)
+        => _typeCache.GetOrAdd(c.ResourceKey, key =>
+            AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => SafeGetTypes(a))
+                .FirstOrDefault(t => t.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException($"Cannot resolve CLR type for resourceKey '{key}'."));
+
+    private Type? TryResolveClrType(ResourceContract c)
+    {
+        try { return ResolveClrType(c); }
+        catch { return null; }
     }
 
     private static IEnumerable<Type> SafeGetTypes(System.Reflection.Assembly a)
@@ -757,14 +828,14 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // Minimal: call engine via reflection.
         var m = typeof(EfCrudQueryEngine).GetMethod(nameof(EfCrudQueryEngine.Apply))!
             .MakeGenericMethod(clrType);
-        return (IQueryable)m.Invoke(_query, new object[] { query, c, spec })!;
+        return (IQueryable)m.Invoke(_query, System.Reflection.BindingFlags.DoNotWrapExceptions, null, new object[] { query, c, spec }, null)!;
     }
 
     private IQueryable ApplyFilterSpec(IQueryable query, Type clrType, ResourceContract c, QuerySpec spec)
     {
         var m = typeof(EfCrudQueryEngine).GetMethod(nameof(EfCrudQueryEngine.ApplyFiltersAndSort))!
             .MakeGenericMethod(clrType);
-        return (IQueryable)m.Invoke(_query, new object[] { query, c, spec })!;
+        return (IQueryable)m.Invoke(_query, System.Reflection.BindingFlags.DoNotWrapExceptions, null, new object[] { query, c, spec }, null)!;
     }
 
     private async Task<int> CountAsync(IQueryable query, CancellationToken ct)
@@ -797,7 +868,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var param = System.Linq.Expressions.Expression.Parameter(clrType, "e");
         var member = System.Linq.Expressions.Expression.Property(param, prop);
-        var constant = System.Linq.Expressions.Expression.Constant(Convert.ChangeType(id, prop.PropertyType), prop.PropertyType);
+        var constant = System.Linq.Expressions.Expression.Constant(CoerceKey(id, prop.PropertyType), prop.PropertyType);
         var eq = System.Linq.Expressions.Expression.Equal(member, constant);
         var lambda = System.Linq.Expressions.Expression.Lambda(eq, param);
 
@@ -816,21 +887,89 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         return task.GetType().GetProperty("Result")!.GetValue(task);
     }
 
+    // Coerces a key value (often an already-typed object from the HTTP layer, or a raw string)
+    // to the key property's CLR type. Convert.ChangeType alone throws for Guid/enum, so handle
+    // those explicitly; pass through values that are already the target type.
+    private static object CoerceKey(object id, Type targetType)
+    {
+        var t = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        if (t.IsInstanceOfType(id)) return id;
+        if (t == typeof(string)) return id.ToString()!;
+        if (t == typeof(Guid)) return id is Guid g ? g : Guid.Parse(id.ToString()!);
+        if (t.IsEnum) return id is string es ? Enum.Parse(t, es, ignoreCase: true) : Enum.ToObject(t, id);
+        return Convert.ChangeType(id, t, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    // Bridges the Type-based service to CompiledQueryCache's generic compiled queries. The strongly-typed
+    // invoker is built once per CLR type via Delegate.CreateDelegate (no per-call reflection) and cached.
+    private static readonly ConcurrentDictionary<Type, Func<CompiledQueryCache, DbContext, object, string, CancellationToken, Task<object?>>> _compiledFindByIdInvokers = new();
+
+    private static Func<CompiledQueryCache, DbContext, object, string, CancellationToken, Task<object?>> GetCompiledFindByIdInvoker(Type clrType, ResourceContract c)
+        => _compiledFindByIdInvokers.GetOrAdd(clrType, t =>
+        {
+            var keyType = (t.GetProperty(c.Key.Name)
+                ?? throw new InvalidOperationException($"Key '{c.Key.Name}' not found on '{t.Name}'.")).PropertyType;
+            var mi = typeof(EfDataSurfaceCrudService)
+                .GetMethod(nameof(InvokeCompiledFindByIdAsync), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .MakeGenericMethod(t, keyType);
+            return (Func<CompiledQueryCache, DbContext, object, string, CancellationToken, Task<object?>>)
+                Delegate.CreateDelegate(typeof(Func<CompiledQueryCache, DbContext, object, string, CancellationToken, Task<object?>>), mi);
+        });
+
+    private static async Task<object?> InvokeCompiledFindByIdAsync<TEntity, TKey>(
+        CompiledQueryCache cache, DbContext db, object id, string keyName, CancellationToken ct)
+        where TEntity : class
+    {
+        var compiled = cache.GetOrCreateFindByIdAsyncQuery<TEntity, TKey>(keyName);
+        var key = (TKey)CoerceKey(id, typeof(TKey));
+        return await compiled(db, key, ct).ConfigureAwait(false);
+    }
+
+    // Applies AsNoTracking to a read query — reads never SaveChanges, so EF should not pay the
+    // cost of change-tracking the materialized entities.
+    private static IQueryable AsNoTracking(IQueryable query)
+    {
+        var m = typeof(EntityFrameworkQueryableExtensions).GetMethods()
+            .First(x => x.Name == nameof(EntityFrameworkQueryableExtensions.AsNoTracking)
+                        && x.IsGenericMethodDefinition
+                        && x.GetParameters().Length == 1)
+            .MakeGenericMethod(query.ElementType);
+        return (IQueryable)m.Invoke(null, new object[] { query })!;
+    }
+
+    // Applies a "not soft-deleted" predicate to a read query when the entity implements
+    // ISoftDelete, so soft-deleted rows are hidden from List/Get by default.
+    private static IQueryable ApplySoftDeleteFilter(IQueryable query, Type clrType)
+    {
+        if (!typeof(ISoftDelete).IsAssignableFrom(clrType)) return query;
+
+        var param = System.Linq.Expressions.Expression.Parameter(clrType, "e");
+        var prop = System.Linq.Expressions.Expression.Property(param, nameof(ISoftDelete.IsDeleted));
+        var notDeleted = System.Linq.Expressions.Expression.Not(prop);
+        var lambda = System.Linq.Expressions.Expression.Lambda(notDeleted, param);
+
+        var where = typeof(Queryable).GetMethods()
+            .First(m => m.Name == nameof(Queryable.Where) && m.GetParameters().Length == 2)
+            .MakeGenericMethod(clrType);
+
+        return (IQueryable)where.Invoke(null, new object[] { query, lambda })!;
+    }
+
     private object CreateEntityByType(Type clrType, JsonObject body, ResourceContract c)
     {
         // Use mapper to create and populate entity
         var m = typeof(EfCrudMapper).GetMethod(nameof(EfCrudMapper.CreateEntity))!
             .MakeGenericMethod(clrType);
-        return m.Invoke(_mapper, new object[] { body, c, _db })!;
+        return m.Invoke(_mapper, System.Reflection.BindingFlags.DoNotWrapExceptions, null, new object[] { body, c, _db }, null)!;
     }
 
-    private static JsonObject EntityToJson(object entity, ResourceContract c, ExpandSpec? expand, string? projectedFields = null)
+    private JsonObject EntityToJson(object entity, ResourceContract c, ExpandSpec? expand, string? projectedFields = null, bool expandRelations = true)
     {
         var o = new JsonObject();
         var readFields = c.Fields.Where(f => f.InRead && !f.Hidden).ToList();
 
         // Apply field projection if specified
-        if (!string.IsNullOrWhiteSpace(projectedFields))
+        if (_features.EnableFieldProjection && !string.IsNullOrWhiteSpace(projectedFields))
         {
             var requested = new HashSet<string>(
                 projectedFields.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
@@ -841,10 +980,10 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         foreach (var f in readFields)
         {
             // Handle computed fields
-            if (f.Computed && !string.IsNullOrWhiteSpace(f.ComputedExpression))
+            if (_features.EnableComputedFields && f.Computed && !string.IsNullOrWhiteSpace(f.ComputedExpression))
             {
                 var computedVal = EvaluateComputedExpression(entity, f.ComputedExpression);
-                o[f.ApiName] = computedVal is null ? null : JsonValue.Create(computedVal);
+                o[f.ApiName] = ScalarToJson(computedVal);
                 continue;
             }
 
@@ -852,7 +991,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             if (p == null) continue;
 
             var val = p.GetValue(entity);
-            o[f.ApiName] = val is null ? null : JsonValue.Create(val);
+            o[f.ApiName] = ScalarToJson(val);
         }
 
         // expand: include nav objects as nested JSON (depth 1)
@@ -864,10 +1003,11 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 toSerialize.Add(e);
         }
 
-        if (toSerialize.Count > 0)
+        if (expandRelations && toSerialize.Count > 0)
         {
             // Derive camelCase convention from the contract: if any field has a PascalCase
-            // CLR name but a camelCase API name, the convention is camelCase.
+            // CLR name but a camelCase API name, the convention is camelCase. Only used for
+            // the fallback path (related types that have no resource contract of their own).
             var useCamelCase = c.Fields.Any(f =>
                 f.Name.Length > 0 && f.ApiName.Length > 0 &&
                 char.IsUpper(f.Name[0]) && char.IsLower(f.ApiName[0]));
@@ -884,22 +1024,56 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 var nav = navProp.GetValue(entity);
                 if (nav is null) { o[relApi] = null; continue; }
 
+                // Serialize related entities through THEIR OWN resource contract so that
+                // Hidden / non-read / field-authorized fields are not leaked via expand.
+                var targetContract = ResolveContractOrNull(rel.TargetResourceKey);
+
                 if (nav is System.Collections.IEnumerable seq && nav is not string)
                 {
                     var arr = new JsonArray();
                     foreach (var item in seq.Cast<object>())
-                        arr.Add(SimpleObjectToJson(item, useCamelCase));
+                        arr.Add(SerializeRelated(item, targetContract, useCamelCase));
                     o[relApi] = arr;
                 }
                 else
                 {
-                    o[relApi] = SimpleObjectToJson(nav, useCamelCase);
+                    o[relApi] = SerializeRelated(nav, targetContract, useCamelCase);
                 }
             }
         }
 
         return o;
     }
+
+    // Resolves a related resource's contract without throwing (GetByResourceKey throws).
+    private ResourceContract? ResolveContractOrNull(string resourceKey)
+        => _contracts.All.FirstOrDefault(rc => rc.ResourceKey.Equals(resourceKey, StringComparison.OrdinalIgnoreCase));
+
+    // Serializes a related entity. When the target has its own contract, only that
+    // contract's read fields are emitted (depth 1, no further expansion) and field-level
+    // authorization is applied — preventing expand from leaking hidden/unauthorized fields.
+    // When there is no contract for the target type, falls back to a scalar dump (there is
+    // no contract to restrict, so nothing is being bypassed).
+    private JsonObject SerializeRelated(object item, ResourceContract? targetContract, bool useCamelCase)
+    {
+        if (targetContract is null)
+            return SimpleObjectToJson(item, useCamelCase);
+
+        var nested = EntityToJson(item, targetContract, expand: null, projectedFields: null, expandRelations: false);
+        _security?.RedactUnauthorizedFields(targetContract, nested);
+        return nested;
+    }
+
+    // Converts a scalar CLR value to a JSON node. A byte[] (typically a rowversion /
+    // concurrency token) is emitted as base64 so it round-trips with If-Match / ETag
+    // handling, which compares against Convert.ToBase64String(bytes).
+    private static JsonNode? ScalarToJson(object? val)
+        => val switch
+        {
+            null => null,
+            byte[] bytes => JsonValue.Create(Convert.ToBase64String(bytes)),
+            _ => JsonValue.Create(val)
+        };
 
     private static JsonObject SimpleObjectToJson(object obj, bool useCamelCase)
     {
@@ -1021,17 +1195,23 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
     }
 
-    private static void ValidateBody(ResourceContract c, CrudOperation op, JsonObject body)
+    private static void ValidateBody(ResourceContract c, CrudOperation op, JsonObject body, bool validateFieldConstraints)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         var oc = c.Operations[op];
 
         var allowed = new HashSet<string>(oc.InputShape, StringComparer.OrdinalIgnoreCase);
 
+        // The optimistic-concurrency token (e.g. an If-Match rowversion injected by the HTTP
+        // layer) is a valid input on update even though it is not part of the writable update
+        // shape. Allow it through here; it is consumed by the concurrency check, not written.
+        var concurrencyApiName = op == CrudOperation.Update ? oc.Concurrency?.FieldApiName : null;
+
         // unknown fields
         foreach (var key in body.Select(kv => kv.Key))
         {
-            if (!allowed.Contains(key))
+            if (!allowed.Contains(key)
+                && !string.Equals(key, concurrencyApiName, StringComparison.OrdinalIgnoreCase))
                 errors[key] = new[] { "Field is not allowed for this operation." };
         }
 
@@ -1048,7 +1228,6 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // immutable on update (skip concurrency field — it's validated separately)
         if (op == CrudOperation.Update)
         {
-            var concurrencyApiName = oc.Concurrency?.FieldApiName;
             foreach (var imm in oc.ImmutableFields)
             {
                 if (body.ContainsKey(imm)
@@ -1065,7 +1244,8 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         // Field-level validation (MinLength, MaxLength, Min, Max, Regex, AllowedValues)
-        Validation.FieldValidator.ValidateFieldConstraints(c, body, errors);
+        if (validateFieldConstraints)
+            Validation.FieldValidator.ValidateFieldConstraints(c, body, errors);
 
         if (errors.Count > 0)
             throw new CrudRequestValidationException(errors);

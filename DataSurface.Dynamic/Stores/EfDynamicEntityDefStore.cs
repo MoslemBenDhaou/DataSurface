@@ -1,4 +1,6 @@
+using System.Text.Json;
 using DataSurface.Core.Contracts;
+using DataSurface.Core.Enums;
 using DataSurface.Dynamic.Entities;
 using Microsoft.EntityFrameworkCore;
 
@@ -120,6 +122,25 @@ public sealed class EfDynamicEntityDefStore : IDynamicEntityDefStore
             ForeignKeyProperty: r.ForeignKeyProperty
         )).ToList();
 
+        TenantContract? tenant = string.IsNullOrWhiteSpace(e.TenantFieldName)
+            ? null
+            : new TenantContract(e.TenantFieldName!, e.TenantFieldApiName ?? e.TenantFieldName!,
+                e.TenantClaimType ?? "tenant_id", e.TenantRequired);
+
+        IReadOnlyDictionary<CrudOperation, string?>? policies = null;
+        if (!string.IsNullOrWhiteSpace(e.PoliciesJson))
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, string?>>(e.PoliciesJson);
+            if (raw is { Count: > 0 })
+            {
+                var map = new Dictionary<CrudOperation, string?>();
+                foreach (var kv in raw)
+                    if (Enum.TryParse<CrudOperation>(kv.Key, ignoreCase: true, out var op))
+                        map[op] = kv.Value;
+                if (map.Count > 0) policies = map;
+            }
+        }
+
         return new EntityDef(
             EntityKey: e.EntityKey,
             Route: e.Route,
@@ -135,7 +156,8 @@ public sealed class EfDynamicEntityDefStore : IDynamicEntityDefStore
             EnableDelete: e.EnableDelete,
             Properties: props,
             Relations: rels,
-            Policies: null
+            Policies: policies,
+            Tenant: tenant
         );
     }
 }

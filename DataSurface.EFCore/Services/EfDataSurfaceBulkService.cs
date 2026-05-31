@@ -82,10 +82,7 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                     });
 
                     if (spec.StopOnError)
-                    {
-                        if (transaction is not null) await transaction.RollbackAsync(ct);
                         break;
-                    }
                 }
             }
 
@@ -111,10 +108,7 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                         });
 
                         if (spec.StopOnError)
-                        {
-                            if (transaction is not null) await transaction.RollbackAsync(ct);
                             break;
-                        }
                     }
                 }
             }
@@ -141,10 +135,7 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                         });
 
                         if (spec.StopOnError)
-                        {
-                            if (transaction is not null) await transaction.RollbackAsync(ct);
                             break;
-                        }
                     }
                 }
             }
@@ -160,7 +151,11 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
         catch (Exception ex)
         {
             if (transaction is not null)
-                await transaction.RollbackAsync(ct);
+            {
+                // Defensive: the transaction may already have been rolled back (or completed) by the
+                // commit/rollback block above; don't let a second rollback mask the real error.
+                try { await transaction.RollbackAsync(ct); } catch { /* already completed */ }
+            }
 
             errors.Add(new BulkOperationError
             {
@@ -173,6 +168,16 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
         {
             if (transaction is not null)
                 await transaction.DisposeAsync();
+        }
+
+        // If a transaction was used and any operation failed, the whole batch was rolled back,
+        // so the per-item successes never persisted. Clear them so the response does not report
+        // created/updated/deleted records that no longer exist.
+        if (spec.UseTransaction && errors.Count > 0)
+        {
+            created.Clear();
+            updated.Clear();
+            deletedCount = 0;
         }
 
         sw.Stop();

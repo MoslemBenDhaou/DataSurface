@@ -228,4 +228,43 @@ public class BulkServiceTests : IDisposable
         result.Updated.Should().BeEmpty();
         result.DeletedCount.Should().Be(0);
     }
+
+    // ────────────────────────────────────────────
+    //  B8: a rolled-back transactional batch must not report per-item successes
+    // ────────────────────────────────────────────
+
+    [Fact]
+    public async Task BulkTransaction_OnError_DoesNotReportSuccesses()
+    {
+        // InMemory does not perform real transactions, so ignore the warning; the point of this
+        // test is that the bulk RESULT must not report successes once the batch is rolled back.
+        var options = new DbContextOptionsBuilder<CrudTestDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.InMemoryEventId.TransactionIgnoredWarning))
+            .Options;
+        using var db = new CrudTestDbContext(options);
+        db.Database.EnsureCreated();
+        using var factory = new TestServiceFactory(db, new[] { BuildContract() });
+        var bulk = new EfDataSurfaceBulkService(db, factory.CrudService, factory.Contracts,
+            NullLogger<EfDataSurfaceBulkService>.Instance);
+
+        var spec = new BulkOperationSpec
+        {
+            Create = new[]
+            {
+                new JsonObject { ["name"] = "Valid", ["price"] = 1m },
+                new JsonObject { ["price"] = 2m } // missing required "name" -> error
+            },
+            StopOnError = false,
+            UseTransaction = true
+        };
+
+        var result = await bulk.ExecuteAsync("SimpleItem", spec);
+
+        result.Success.Should().BeFalse();
+        result.Errors.Should().HaveCount(1);
+        // The first create "succeeded" mid-batch, but the transaction was rolled back, so it
+        // must not be reported as created.
+        result.Created.Should().BeEmpty();
+    }
 }

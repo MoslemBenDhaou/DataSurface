@@ -167,3 +167,6 @@ appsettings.local.json
 
 # LOCAL DEV
 DISCREPANCY_REPORT.md
+
+# Internal / working docs — kept locally, not part of the published doc set
+docs/internal/

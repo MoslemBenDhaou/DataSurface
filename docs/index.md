@@ -123,6 +123,7 @@ await crudService.CreateAsync("User", body, ct);
 | `DataSurface.Dynamic` | Runtime metadata storage, dynamic CRUD service |
 | `DataSurface.Admin` | Admin REST API for managing dynamic entity definitions |
 | `DataSurface.OpenApi` | Swashbuckle integration for typed schemas |
+| `DataSurface.Scalar` | Scalar API reference UI (additive to Swagger) |
 | `DataSurface.Generator` | *(Optional)* Source generator for typed DTOs |
 
 **Typical combinations:**

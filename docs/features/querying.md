@@ -64,6 +64,20 @@ When the operator is omitted, `eq` is assumed:
 ?filter[status]=active       # same as filter[status]=eq:active
 ```
 
+Only the whitelisted operator prefixes above are treated as operators. A value whose prefix is not a known operator is parsed as a plain equality value, so values that naturally contain `:` (ISO timestamps, URNs, `ns:key` strings) work without escaping:
+
+```
+?filter[createdAt]=2026-01-01T00:00:00Z   # plain equality, not torn at the colon
+```
+
+### Filter Errors
+
+The following return HTTP 400 with the offending field in `errors`:
+
+- An unparseable filter value for the field's type (e.g. `filter[price]=gt:abc`)
+- An operator unsupported for the field's type (e.g. `contains` on a number, `gt` on a bool)
+- `isnull` on a non-nullable field
+
 ### Multiple Filters
 
 Multiple filters are combined with AND logic:
@@ -109,9 +123,13 @@ Set a default sort order per resource:
 public class Post { /* ... */ }
 ```
 
-The default sort applies when no `sort` parameter is provided.
+The default sort applies when no `sort` parameter is provided. Every field referenced by `DefaultSort` must be sortable (`CrudDto.Sort`) — this is validated at startup, and an invalid `DefaultSort` fails contract validation.
 
 Sorts on non-sortable fields are silently ignored.
+
+### Deterministic Ordering
+
+Every paged query has a guaranteed deterministic order: the requested `sort` wins, falling back to the contract's `DefaultSort`, and the key is always appended as a final tie-breaker (or used as the only ordering when no sort applies). Unsorted list queries are therefore ordered by key — pages never repeat or skip rows.
 
 ---
 

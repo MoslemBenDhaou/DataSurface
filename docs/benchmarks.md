@@ -26,6 +26,8 @@ These benchmarks measure the **query engine layer** (`EfCrudQueryEngine`) — th
 
 **Not included:** HTTP parsing, serialization, database I/O, network latency, hooks, or security checks. Real-world end-to-end latency will be higher due to these additional layers.
 
+> **Note:** these numbers predate the query engine's deterministic-ordering guarantee. Every paged query — including unsorted ones — now appends the key as an `ORDER BY` tie-breaker, which adds a small ordering cost to the `PaginationOnly` baseline.
+
 ---
 
 ## Understanding the Columns
@@ -164,7 +166,7 @@ Based on these benchmarks:
 2. **Limit sort fields** — The `SortableFields` allowlist in the contract is important; keep it focused
 3. **Use default sorts** — Set `DefaultSort` on resources to avoid client-requested multi-sort on large datasets
 4. **Monitor complex queries** — The `ComplexQuery` benchmark represents a worst-case scenario; consider query cost limits for production APIs
-5. **Consider compiled queries** — For hot paths with predictable access patterns, `CompiledQueryCache` can eliminate expression tree compilation overhead
+5. **Consider compiled queries** — For hot paths, the `CompiledQueryCache` (used for simple by-id reads) can eliminate expression tree compilation overhead
 
 ---
 

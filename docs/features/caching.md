@@ -44,6 +44,8 @@ builder.Services.AddSingleton<IQueryResultCache, DistributedQueryResultCache>();
 | **Update** | Invalidates the specific entity cache and list caches |
 | **Delete** | Invalidates the specific entity cache and list caches |
 
+Cache hits are still full reads: global hooks (`ICrudHook`) run and an audit entry is written even when the result is served from cache. Caching is automatically bypassed when per-user security (tenant isolation, row-level security, resource/field authorization) applies to the resource, so cached data is never served across users.
+
 ### Per-Resource Configuration
 
 Different resources can have different cache durations and strategies:
@@ -100,22 +102,24 @@ This saves bandwidth — the full response body is not sent.
 
 ### Cache-Control Headers
 
-Configure `Cache-Control` headers for client-side and proxy caching:
+Configure `Cache-Control` headers for client-side caching:
 
 ```csharp
 app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 {
     EnableConditionalGet = true,          // If-None-Match → 304
-    CacheControlMaxAgeSeconds = 300       // Cache-Control: max-age=300
+    CacheControlMaxAgeSeconds = 300       // Cache-Control: private, max-age=300
 });
 ```
+
+The emitted header is `Cache-Control: private, max-age=N` — responses are typically tenant- or user-scoped, so shared caches (CDNs, reverse proxies) must not store them.
 
 ### Configuration
 
 ```csharp
 app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 {
-    EnableEtags = true,                   // Include ETag in responses (default: true)
+    EnableEtags = true,                   // Include ETag in responses (default: false)
     EnableConditionalGet = true,          // Support If-None-Match → 304
     CacheControlMaxAgeSeconds = 300       // Set Cache-Control header
 });

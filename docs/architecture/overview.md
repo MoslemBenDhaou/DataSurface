@@ -34,7 +34,7 @@ DataSurface is organized as a set of modular NuGet packages, each with a clear r
 |--------|------|
 | `DataSurface.Admin` | REST API for managing dynamic entity definitions at runtime |
 | `DataSurface.OpenApi` | Swashbuckle operation filters and typed schema generation |
-| `DataSurface.Generator` | Roslyn source generator for typed DTOs |
+| `DataSurface.Generator` | Roslyn source generator for typed DTOs and minimal-API endpoint mappers |
 
 ---
 

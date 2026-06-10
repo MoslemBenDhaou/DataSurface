@@ -16,6 +16,7 @@ DataSurface provides comprehensive built-in validation driven by the ResourceCon
 | Max value | `Max = N` | POST, PATCH | Maximum numeric value |
 | Regex pattern | `Regex = "..."` | POST, PATCH | Value must match the regular expression |
 | Allowed values | `AllowedValues = "a\|b\|c"` | POST, PATCH | Value must be one of the pipe-separated options |
+| JSON type check | *(automatic)* | POST, PATCH | Wrong JSON type for a field is rejected with 400 — e.g. a number sent for a string field returns `"Value must be a string."`, a non-numeric value for a numeric field returns `"Value must be a valid number."` |
 | Unknown field rejection | *(automatic)* | POST, PATCH | Fields not in the contract are rejected |
 
 ---
@@ -94,15 +95,15 @@ Validation errors return HTTP 400 with RFC 7807 Problem Details:
 
 ```json
 {
-  "type": "https://datasurface/errors/validation",
   "title": "Validation failed",
   "status": 400,
+  "detail": "One or more validation errors occurred.",
   "traceId": "00-abc123...",
   "errors": {
-    "email": ["Required"],
-    "password": ["Min length is 8"],
-    "age": ["Must be between 0 and 150"],
-    "status": ["Must be one of: Active, Inactive, Pending"]
+    "email": ["Field is required."],
+    "password": ["Minimum length is 8."],
+    "age": ["Maximum value is 150."],
+    "status": ["Value must be one of: Active, Inactive, Pending."]
   }
 }
 ```
@@ -118,7 +119,7 @@ Validation can be disabled via feature flags:
 ```csharp
 opt.Features = new DataSurfaceFeatures
 {
-    EnableFieldValidation = false  // Disables MinLength, MaxLength, Min, Max, Regex, AllowedValues
+    EnableFieldValidation = false  // Disables MinLength, MaxLength, Min, Max, Regex, AllowedValues and the JSON type check
 };
 ```
 

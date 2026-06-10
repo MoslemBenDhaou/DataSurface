@@ -73,6 +73,8 @@ Each metric includes tags for filtering:
 opt.Features.EnableMetrics = true;  // default: true in Standard/Full
 ```
 
+When `EnableMetrics` is `false`, the CRUD and streaming services do not record metrics even if `DataSurfaceMetrics` is registered.
+
 ---
 
 ## Distributed Tracing
@@ -108,6 +110,8 @@ Traces integrate with any OpenTelemetry-compatible backend (Jaeger, Zipkin, Azur
 ```csharp
 opt.Features.EnableTracing = true;  // default: true in Standard/Full
 ```
+
+When `EnableTracing` is `false`, the CRUD and streaming services do not start spans even if a listener is subscribed to the `DataSurface` activity source.
 
 ---
 
@@ -189,10 +193,15 @@ builder.Services.AddScoped<IAuditLogger, DatabaseAuditLogger>();
 | `Operation` | `CrudOperation` | The operation performed |
 | `ResourceKey` | `string` | Resource that was accessed |
 | `EntityId` | `string?` | Entity ID (if applicable) |
-| `Timestamp` | `DateTimeOffset` | UTC timestamp |
+| `Timestamp` | `DateTime` | UTC timestamp |
+| `UserId` | `string?` | User who performed the operation |
+| `IpAddress` | `string?` | Client IP address |
 | `Success` | `bool` | Whether the operation succeeded |
+| `ErrorMessage` | `string?` | Error message when the operation failed |
 | `Changes` | `JsonObject?` | Fields written (create/update) |
 | `PreviousValues` | `JsonObject?` | Previous field values (update) |
+
+Audit entries are written for cache hits too — a read served from the query cache is still audited. Inside bulk transactions, audit entries (and webhooks) are buffered and emitted only after a successful commit; a rollback discards them.
 
 ### Feature Flag
 

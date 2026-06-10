@@ -33,6 +33,8 @@ public class User
 
 The `RowVersion` property is automatically configured as an EF Core concurrency token when `EnableRowVersionConvention = true` (the default).
 
+The token is **auto-exposed read-only** in the read shape even when the property has no `[CrudField]` attribute, so clients can always obtain it. Its API name follows a `[CrudField(ApiName = ...)]` override when one is present. `byte[]` tokens are serialized as base64 strings.
+
 ---
 
 ## Request Flow
@@ -48,7 +50,7 @@ HTTP/1.1 200 OK
 ETag: W/"AAAAAAB="
 Content-Type: application/json
 
-{"id": 1, "email": "alice@example.com"}
+{"id": 1, "email": "alice@example.com", "rowVersion": "AAAAAAB="}
 ```
 
 ### Step 2 — Update with concurrency check
@@ -76,12 +78,17 @@ ETag: W/"AAAAAAC="
 HTTP/1.1 409 Conflict
 
 {
-  "type": "https://datasurface/errors/conflict",
   "title": "Concurrency conflict",
   "status": 409,
-  "detail": "The resource has been modified by another request."
+  "detail": "The record was modified by another request. Please refresh and try again."
 }
 ```
+
+### If-Match Notes
+
+- `If-Match: *` follows RFC 9110 — it means "proceed if the resource exists" and performs no token comparison
+- `DELETE` also honors `If-Match`: a stale token returns 409
+- A token that is not valid base64 returns 400
 
 ---
 
@@ -113,9 +120,13 @@ ETags are controlled via `DataSurfaceHttpOptions`:
 ```csharp
 app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 {
-    EnableEtags = true  // default: true
+    EnableEtags = true  // default: false (opt-in)
 });
 ```
+
+### Dynamic Resources
+
+Dynamic (runtime-defined) resources support row-version concurrency end-to-end: the token is projected into reads as base64, conflicts are enforced by EF Core original-value tracking at `SaveChanges`, and `If-Match` is honored on PATCH and DELETE.
 
 ---
 
@@ -133,6 +144,8 @@ If the resource hasn't changed:
 ```http
 HTTP/1.1 304 Not Modified
 ```
+
+`If-None-Match` accepts comma-separated ETag lists, weak (`W/`) prefixes, and `*`, compared per RFC 9110 weak comparison.
 
 This reduces bandwidth for clients that cache responses. See [Caching](caching.md) for more details.
 

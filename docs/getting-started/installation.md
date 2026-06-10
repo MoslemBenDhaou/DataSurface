@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- **.NET 9.0** or later
-- **Entity Framework Core 9.0** (for EF Core backend)
+- **.NET 10.0** or later
+- **Entity Framework Core 10.0** (for EF Core backend)
 - An ASP.NET Core application (for HTTP endpoints)
 
 ## NuGet Packages
@@ -28,6 +28,9 @@ dotnet add package DataSurface.Admin
 
 # OpenAPI — for Swashbuckle/Swagger integration
 dotnet add package DataSurface.OpenApi
+
+# Scalar — API reference UI (additive to Swagger)
+dotnet add package DataSurface.Scalar
 
 # Source generator (optional) — for typed DTO generation
 dotnet add package DataSurface.Generator
@@ -81,6 +84,9 @@ Add these to any combination above:
 ```xml
 <!-- Swagger/OpenAPI typed schemas -->
 <PackageReference Include="DataSurface.OpenApi" Version="*" />
+
+<!-- Scalar API reference UI -->
+<PackageReference Include="DataSurface.Scalar" Version="*" />
 
 <!-- Compile-time typed DTO generation -->
 <PackageReference Include="DataSurface.Generator" Version="*" />

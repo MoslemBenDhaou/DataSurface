@@ -122,7 +122,7 @@ DELETE /api/users/{id}
 - Ideal for internal services, background jobs, or modular monoliths
 
 ```csharp
-await crudService.CreateAsync("User", body, context, ct);
+await crudService.CreateAsync("User", body, ct);
 ```
 
 No controllers. No HTTP. Same guarantees.
@@ -168,7 +168,8 @@ it **handles the 80% so you can focus on the 20%**.
 | **Concurrency** | Row version + `ETag` / `If-Match` headers |
 | **Hooks** | Global and entity-specific lifecycle hooks |
 | **Overrides** | Replace any CRUD operation with custom logic |
-| **Dynamic entities** | Runtime-defined resources without recompilation || **Query caching** | Optional `IDistributedCache` integration |
+| **Dynamic entities** | Runtime-defined resources without recompilation |
+| **Query caching** | Optional `IDistributedCache` integration |
 | **Response caching** | ETag-based 304 responses, configurable Cache-Control |
 | **Bulk operations** | Batch create/update/delete via `/bulk` endpoint |
 | **Import/Export** | Bulk data import/export in JSON or CSV format |
@@ -234,18 +235,13 @@ public class User
 using DataSurface.EFCore.Services;
 using System.Reflection;
 
-// Register contracts and EF Core services
-builder.Services.AddDataSurfaceEfCore(opt =>
+// Register contracts, EF Core services, and the full CRUD runtime.
+// The generic overload aliases your DbContext to the base DbContext
+// the CRUD services depend on.
+builder.Services.AddDataSurfaceEfCore<AppDbContext>(opt =>
 {
     opt.AssembliesToScan = [Assembly.GetExecutingAssembly()];
 });
-
-// Register CRUD runtime
-builder.Services.AddScoped<CrudHookDispatcher>();
-builder.Services.AddSingleton<CrudOverrideRegistry>();
-builder.Services.AddScoped<EfDataSurfaceCrudService>();
-builder.Services.AddScoped<IDataSurfaceCrudService>(sp => 
-    sp.GetRequiredService<EfDataSurfaceCrudService>());
 ```
 
 ### 3. Map endpoints

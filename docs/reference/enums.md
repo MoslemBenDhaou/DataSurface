@@ -59,21 +59,23 @@ Backend storage types for resources.
 
 Canonical field types mapping CLR types to contract representations.
 
-| Value | C# Type | JSON Type |
+| Value | C# Types | JSON Type |
 |-------|---------|-----------|
-| `String` | `string` | `string` |
-| `Int32` | `int` | `integer` (format: int32) |
-| `Int64` | `long` | `integer` (format: int64) |
-| `Decimal` | `decimal` | `number` |
+| `String` | `string`, `char`, `TimeOnly`, `TimeSpan`, `byte[]` *(base64)* | `string` |
+| `Int32` | `int`, `short`, `byte`, `sbyte`, `ushort` | `integer` (format: int32) |
+| `Int64` | `long`, `uint`, `ulong` | `integer` (format: int64) |
+| `Decimal` | `decimal`, `double`, `float` | `number` |
 | `Boolean` | `bool` | `boolean` |
-| `DateTime` | `DateTime` | `string` (format: date-time) |
+| `DateTime` | `DateTime`, `DateTimeOffset`, `DateOnly` | `string` (format: date-time) |
 | `Guid` | `Guid` | `string` (format: uuid) |
-| `Json` | `JsonNode` / `JsonObject` | `object` |
+| `Json` | Other complex types *(fallback)* | `object` |
 | `Enum` | Enum types | `string` |
 | `StringArray` | `string[]` | `array` of `string` |
 | `IntArray` | `int[]` | `array` of `integer` |
 | `GuidArray` | `Guid[]` | `array` of `string` (format: uuid) |
 | `DecimalArray` | `decimal[]` | `array` of `number` |
+
+Nullable CLR types (`int?`, `DateTime?`, …) map to the same `FieldType` with the field marked nullable.
 
 ---
 

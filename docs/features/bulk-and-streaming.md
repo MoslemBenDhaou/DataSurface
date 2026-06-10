@@ -12,6 +12,11 @@ Batch create, update, and delete operations in a single request via `POST /api/{
 
 ```csharp
 builder.Services.AddScoped<IDataSurfaceBulkService, EfDataSurfaceBulkService>();
+
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableBulkOperations = true   // default: false — bulk endpoints are opt-in
+});
 ```
 
 ### Request Format
@@ -44,7 +49,10 @@ builder.Services.AddScoped<IDataSurfaceBulkService, EfDataSurfaceBulkService>();
 ### Behavior
 
 - All validation, hooks, and security checks apply to each individual operation
+- `/bulk` enforces each operation's authorization policy for whichever sections (`create` / `update` / `delete`) are non-empty — a caller with only the Create policy cannot piggyback updates or deletes
 - When `useTransaction = true`, a failure rolls back all changes
+- Inside a transaction, webhook events and audit entries are buffered and flushed only **after** a successful commit — a rolled-back batch emits nothing
+- A failed item does not poison subsequent items: the EF change tracker is cleared after each per-item failure
 - When `stopOnError = false`, errors are collected and returned without halting
 
 ---
@@ -57,6 +65,11 @@ Stream large datasets via `GET /api/{resource}/stream` using NDJSON (newline-del
 
 ```csharp
 builder.Services.AddScoped<IDataSurfaceStreamingService, EfDataSurfaceStreamingService>();
+
+app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
+{
+    EnableStreaming = true   // default: false — the stream endpoint is opt-in
+});
 ```
 
 ### Usage
@@ -86,6 +99,7 @@ await foreach (var item in streamingService.StreamAsync("User", querySpec))
 - Uses `IAsyncEnumerable<T>` — items are sent as they are read from the database
 - No pagination — streams the entire result set
 - Filters, sorting, and security checks apply as with normal list queries
+- Output ordering is deterministic — the requested sort (or the contract's `DefaultSort`) applies, with the key appended as a final tie-breaker
 - Ideal for large exports, data migration, and ETL pipelines
 - Content-Type: `application/x-ndjson`
 
@@ -119,6 +133,7 @@ GET /api/users/export?format=csv
 - Exports all records matching any applied query filters
 - Security filters (tenant, row-level) are respected
 - Field authorization redaction applies
+- CSV output neutralizes formula injection (cells starting with `=`, `+`, `-`, `@`, tab, or CR are prefixed so spreadsheet apps don't execute them)
 - Capped by `DataSurfaceHttpOptions.MaxExportRows` (default 100,000); when the cap is reached the response is truncated and an `X-Export-Truncated: true` header is added. For unbounded reads, use the [streaming endpoint](#async-streaming) instead.
 
 ### Import
@@ -137,26 +152,18 @@ Content-Type: application/json
 
 ```json
 {
-  "totalRecords": 2,
-  "importedCount": 2,
-  "failedCount": 0,
+  "total": 2,
+  "success": 2,
+  "failures": 0,
   "errors": []
 }
 ```
 
-### Import Options
-
-| Option | Description |
-|--------|-------------|
-| `SkipValidation` | Skip field validation (use with caution) |
-| `UpdateExisting` | Update records if they already exist (by key) |
-
 ### Import Behavior
 
-- Each record is validated against the resource contract
-- Validation errors are collected per record
-- Hooks and security checks apply to each record
-- Returns a summary of imported, failed, and skipped records
+- Each record is created through the standard CRUD pipeline — validation, hooks, and security checks apply per record
+- Errors are collected per row (`{ "row": n, "error": "..." }`); internal exception details are sanitized and never leak to the caller
+- The import is atomic: all rows run inside a transaction that commits only if **every** row succeeds — any failure rolls the whole import back
 
 ---
 

@@ -32,6 +32,9 @@ Returns a paginated list of resources with filtering, sorting, and search.
 | `expand` | `?expand=author,tags` | Include related resources |
 | `fields` | `?fields=id,title,email` | Return only specified fields |
 
+Results are always deterministically ordered: the requested `sort` wins, falling back to the
+resource's `DefaultSort` (see `[CrudResource]`), with the key appended as a final tie-breaker.
+
 **Response:** `200 OK`
 
 ```json
@@ -51,6 +54,7 @@ Returns a paginated list of resources with filtering, sorting, and search.
 | `X-Page` | `1` | Current page number |
 | `X-Page-Size` | `20` | Items per page |
 | `ETag` | `W/"..."` | Entity tag (if enabled) |
+| `Cache-Control` | `private, max-age=60` | Emitted when `CacheControlMaxAgeSeconds > 0` |
 
 ---
 
@@ -66,7 +70,9 @@ Returns only count information — no response body.
 
 **Response:** `200 OK` (empty body)
 
-**Response Headers:** Same as List (`X-Total-Count`, `X-Page`, `X-Page-Size`).
+**Response Headers:** Same as List (`X-Total-Count`, `X-Page`, `X-Page-Size`). `X-Page-Size`
+reports the effective page size an equivalent GET would use (the requested size clamped to the
+resource's `MaxPageSize`).
 
 ---
 
@@ -133,6 +139,9 @@ Creates a new resource. Body must contain fields with `CrudDto.Create` flag.
   "createdAt": "2024-12-28T14:30:00Z"
 }
 ```
+
+The `Location` header contains a relative, URL-encoded URI to the created resource
+(e.g., `/api/users/1`).
 
 **Errors:**
 - `400 Bad Request` — Validation failure (missing required fields, invalid values, unknown fields)
@@ -209,9 +218,13 @@ POST /api/{route}/bulk
 Content-Type: application/json
 ```
 
-**Requires:** `IDataSurfaceBulkService` registered.
+**Requires:** `EnableBulkOperations = true` in `DataSurfaceHttpOptions` (the
+`IDataSurfaceBulkService` is registered by `AddDataSurfaceEfCore`).
 
-Batch create, update, and delete operations. See [Bulk Operations](../features/bulk-and-streaming.md).
+Batch create, update, and delete operations. Each non-empty section of the request (create /
+update / delete) is authorized against that operation's policy — a caller with only the Create
+policy cannot mass-update or mass-delete through `/bulk`. See
+[Bulk Operations](../features/bulk-and-streaming.md).
 
 ---
 
@@ -221,7 +234,8 @@ Batch create, update, and delete operations. See [Bulk Operations](../features/b
 GET /api/{route}/stream
 ```
 
-**Requires:** `IDataSurfaceStreamingService` registered.
+**Requires:** `EnableStreaming = true` in `DataSurfaceHttpOptions` (the
+`IDataSurfaceStreamingService` is registered by `AddDataSurfaceEfCore`).
 
 Returns NDJSON (newline-delimited JSON). See [Streaming](../features/bulk-and-streaming.md).
 
@@ -240,6 +254,10 @@ GET /api/{route}/export?format=json
 GET /api/{route}/export?format=csv
 ```
 
+Export materializes the whole result set in memory, capped at `MaxExportRows`
+(default 100000); when the cap is reached the export is truncated and the
+`X-Export-Truncated: true` response header is added.
+
 ### Import
 
 ```
@@ -254,10 +272,13 @@ See [Import/Export](../features/bulk-and-streaming.md).
 ## Schema Endpoint
 
 ```
-GET /api/$schema/{route}
+GET /api/$schema/{resourceKey}
 ```
 
-Returns JSON Schema for a resource. See [OpenAPI Integration](../features/openapi.md).
+**Requires:** `MapSchemaEndpoint = true` (the default; set to `false` to disable).
+
+Returns JSON Schema for a resource. The segment matches the resource key or the route
+(case-insensitive). See [OpenAPI Integration](../features/openapi.md).
 
 ---
 
@@ -267,9 +288,12 @@ Returns JSON Schema for a resource. See [OpenAPI Integration](../features/openap
 GET /api/$resources
 ```
 
-**Requires:** `MapResourceDiscoveryEndpoint = true` (default).
+**Requires:** `MapResourceDiscoveryEndpoint = true` (opt-in; default `false`).
 
 Lists all registered resources (static and dynamic) with metadata.
+
+Both the schema and discovery endpoints participate in the same default authorization, API key
+authentication, and rate limiting as the CRUD endpoints.
 
 ---
 
@@ -323,3 +347,7 @@ Default prefix: `/admin/ds`.
 | `ends` | `filter[name]=ends:son` | String ends with |
 | `in` | `filter[status]=in:a\|b\|c` | In list (pipe-separated) |
 | `isnull` | `filter[email]=isnull:true` | Is null / is not null |
+
+Only these operator prefixes are recognized — a value containing `:` after an unknown prefix
+(e.g., an ISO timestamp `filter[createdAt]=2024-12-28T14:30:00Z`) is treated as a plain
+equality value.

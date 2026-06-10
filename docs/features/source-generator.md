@@ -9,21 +9,23 @@ DataSurface includes an optional Roslyn source generator (`DataSurface.Generator
 Add the generator package:
 
 ```xml
-<PackageReference Include="DataSurface.Generator" Version="*" />
+<PackageReference Include="DataSurface.Generator" Version="*" PrivateAssets="all" />
 ```
 
-The generator automatically runs during compilation — no additional configuration is needed.
+The generator targets `netstandard2.0` and is packaged as a Roslyn analyzer (`analyzers/dotnet/cs`), so it loads in every compiler host — IDE, `dotnet build`, and MSBuild.exe. It runs automatically during compilation — no additional configuration is needed.
 
 ---
 
 ## What It Generates
 
-For each class annotated with `[CrudResource]`, the generator produces:
+For each class **or record** annotated with `[CrudResource]`, the generator produces:
 
 - **Read DTO** — Contains only fields with `CrudDto.Read`
-- **Create DTO** — Contains only fields with `CrudDto.Create`
-- **Update DTO** — Contains only fields with `CrudDto.Update`
-- **Endpoint mapping helpers** — Typed route handlers
+- **Create DTO** — Contains only fields with `CrudDto.Create` (`[Required]` is applied to `RequiredOnCreate` fields)
+- **Update DTO** — Contains only fields with `CrudDto.Update`; all members are nullable/optional
+- **Endpoint mapping helpers** — A `MapDataSurfaceGeneratedCrud()` extension that maps minimal-API routes, emitted only when the project references `DataSurface.EFCore`
+
+Every generated DTO property carries `[JsonPropertyName]` with the field's API name, so the generated endpoints round-trip camelCase JSON correctly with default serializer options.
 
 ### Example
 
@@ -44,32 +46,54 @@ public class User
 }
 ```
 
-The generator produces typed DTOs equivalent to:
+The generator produces DTOs equivalent to:
 
 ```csharp
-public record UserReadDto(int Id, string Email, DateTime CreatedAt);
-public record UserCreateDto(string Email);
-public record UserUpdateDto(string? Email);
+public sealed class UserReadDto
+{
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("email")] public string Email { get; set; } = default!;
+    [JsonPropertyName("createdAt")] public DateTime CreatedAt { get; set; }
+}
+
+public sealed class UserCreateDto
+{
+    [JsonPropertyName("email")] [Required] public string Email { get; set; } = default!;
+}
+
+public sealed class UserUpdateDto
+{
+    [JsonPropertyName("email")] public string? Email { get; set; }
+}
 ```
 
 ---
 
 ## How It Works
 
-The `CrudGenerator` is a Roslyn incremental source generator that:
+The `CrudGenerator` is a true incremental source generator built on `ForAttributeWithMetadataName` with fully value-equatable models (no `ISymbol` or `Compilation` captured), so IDE incremental caching actually works and there is no compiler-host memory leak. It:
 
-1. Identifies classes with `[CrudResource]` attribute
-2. Extracts field definitions from `[CrudKey]`, `[CrudField]`, and `[CrudRelation]` attributes
-3. Generates strongly-typed DTO records and mapping code
-4. Emits diagnostics for misconfigured attributes
+1. Matches classes and records with the `[CrudResource]` attribute (generic entity types are diagnosed and skipped)
+2. Discovers the key the same way `ContractBuilder` does: `CrudResourceAttribute.KeyProperty`, then `[CrudKey]`, then an `Id` or `{TypeName}Id` property — inherited properties included
+3. Extracts field definitions from `[CrudField]`, honoring `[CrudIgnore]` and `[CrudHidden]`; tenant fields are never client-writable
+4. Honors the `EnableList` / `EnableGet` / `EnableCreate` / `EnableUpdate` / `EnableDelete` flags (disabled operations get no endpoints) and applies per-operation `[CrudAuthorize]` policies via `RequireAuthorization`
+5. Emits DTOs and (when `DataSurface.EFCore` is referenced) the endpoint mapper, using fully-qualified `global::` type names and escaped string literals
 
 ### Diagnostics
 
-The generator reports compile-time warnings and errors:
+The generator reports compile-time errors:
 
-- Missing `[CrudKey]` on a `[CrudResource]` class
-- Invalid `CrudDto` flag combinations
-- Unsupported property types
+| ID | Description |
+|----|-------------|
+| `DSG001` | The `[CrudResource]` route is missing or empty |
+| `DSG002` | Multiple fields resolve to the same API name |
+| `DSG003` | No key property found — add `[CrudKey]`, an `Id`/`{TypeName}Id` property, or set `KeyProperty` |
+| `DSG004` | Multiple `[CrudKey]` properties found; only one is allowed |
+| `DSG005` | A property has both `[CrudIgnore]` and `[CrudField]` |
+| `DSG006` | Generic entity types are not supported |
+| `DSG007` | An `ApiName` does not produce a valid C# identifier |
+| `DSG008` | `KeyProperty` names a property that does not exist on the resource type |
+| `DSG009` | `[CrudField]` applied to a navigation-shaped (non-scalar) property — use `[CrudRelation]` instead |
 
 ---
 

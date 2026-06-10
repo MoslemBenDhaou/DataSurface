@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Enums;
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Interfaces;
@@ -19,6 +20,7 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
     private readonly IResourceContractProvider _contracts;
     private readonly ILogger<EfDataSurfaceBulkService> _logger;
     private readonly DataSurfaceMetrics? _metrics;
+    private readonly DataSurfaceFeatures _features;
 
     /// <summary>
     /// Creates a new bulk service instance.
@@ -28,20 +30,22 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
         IDataSurfaceCrudService crud,
         IResourceContractProvider contracts,
         ILogger<EfDataSurfaceBulkService> logger,
-        DataSurfaceMetrics? metrics = null)
+        DataSurfaceMetrics? metrics = null,
+        DataSurfaceFeatures? features = null)
     {
         _db = db;
         _crud = crud;
         _contracts = contracts;
         _logger = logger;
-        _metrics = metrics;
+        _features = features ?? new DataSurfaceFeatures();
+        _metrics = _features.EnableMetrics ? metrics : null;
     }
 
     /// <inheritdoc />
     public async Task<BulkOperationResult> ExecuteAsync(string resourceKey, BulkOperationSpec spec, CancellationToken ct = default)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Create);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.Create) : null;
         activity?.SetTag("datasurface.bulk", true);
         activity?.SetTag("datasurface.bulk.create_count", spec.Create.Count);
         activity?.SetTag("datasurface.bulk.update_count", spec.Update.Count);

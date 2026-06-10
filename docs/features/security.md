@@ -9,14 +9,16 @@ DataSurface provides a layered security model: authorization policies, tenant is
 Set ASP.NET Core authorization policies per operation using `[CrudAuthorize]`:
 
 ```csharp
-[CrudAuthorize(Policy = "AdminOnly")]  // All operations
-[CrudAuthorize(Operation = CrudOperation.Delete, Policy = "SuperAdmin")]  // Override for delete
+[CrudAuthorize("AdminOnly")]  // All operations
+[CrudAuthorize("SuperAdmin", Operation = CrudOperation.Delete)]  // Override for delete
 public class User { /* ... */ }
 ```
 
+- The policy name is the constructor argument; `Operation` is an optional named property
 - Policies are evaluated by ASP.NET Core's `IAuthorizationService`
-- Per-operation policies override the class-level policy
+- Per-operation policies override the class-level (no `Operation`) policy, regardless of attribute order
 - If no policy is set, the endpoint is anonymous (unless `RequireAuthorizationByDefault` is enabled)
+- `POST /api/{resource}/bulk` enforces the per-operation policy for each non-empty section of the request (create/update/delete) — the Create policy alone does not authorize bulk updates or deletes
 
 ### Default Authorization
 
@@ -29,6 +31,8 @@ app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
     DefaultPolicy = "Authenticated"
 });
 ```
+
+The `$schema` and `$resources` metadata endpoints participate in the same default authorization, API key authentication, and rate limiting as the CRUD endpoints.
 
 ---
 
@@ -59,6 +63,8 @@ public class Order
 | **Create** | Automatically sets the tenant field from the user's claim |
 | **Update / Delete** | Validates the resource belongs to the user's tenant |
 
+The tenant field is **server-managed**: it is never client-writable, regardless of any `[CrudField]` flags on the property. Client-supplied tenant values are rejected as unknown fields.
+
 ### Configuration
 
 | Property | Description |
@@ -77,7 +83,7 @@ public class CustomTenantResolver : ITenantResolver
 
     public CustomTenantResolver(IHttpContextAccessor http) => _http = http;
 
-    public string? ResolveTenantId(TenantContract tenant)
+    public string? GetTenantId()
     {
         return _http.HttpContext?.Request.Headers["X-Tenant-Id"].FirstOrDefault();
     }
@@ -115,6 +121,7 @@ builder.Services.AddScoped<IResourceFilter<Order>, TenantResourceFilter>();
 ```
 
 - Filters apply automatically to List, Get, Update, and Delete operations
+- Relation writes (`ById` / `ByIdList`) load their targets through the same filters (plus tenant isolation and the soft-delete scope) — unknown or inaccessible target ids are rejected with 400
 - Users can only access records matching the filter
 - Non-generic `IResourceFilter` is also available for dynamic type filtering
 
@@ -162,6 +169,7 @@ builder.Services.AddScoped<IResourceAuthorizer<Order>, OrderAuthorizer>();
 
 - **Instance-level checks** — "Can this user access Order #123?"
 - **Operation-specific** — Different rules for Get vs Update vs Delete
+- **Runs on every operation** — Get/Update/Delete receive the loaded entity; Create receives the to-be-created instance (before it is persisted); List is invoked with a `null` entity
 - **Non-generic option** — `IResourceAuthorizer` for global policies across all resources
 
 ### Integration with ASP.NET Core Authorization
@@ -237,7 +245,7 @@ public class SensitiveFieldAuthorizer : IFieldAuthorizer
 builder.Services.AddScoped<IFieldAuthorizer, SensitiveFieldAuthorizer>();
 ```
 
-- **Read redaction** — Unauthorized fields are removed from responses
+- **Read redaction** — Unauthorized fields are removed from responses, including the bodies returned by Create and Update (and the webhook payloads built from them)
 - **Write validation** — Unauthorized field writes throw `UnauthorizedAccessException`
 
 ### Feature Flag
@@ -291,9 +299,11 @@ builder.Services.AddScoped<IApiKeyValidator, DatabaseApiKeyValidator>();
 
 | Scenario | Behavior |
 |----------|----------|
-| No `IApiKeyValidator` registered | Any non-empty API key is accepted |
+| No `IApiKeyValidator` registered | `MapDataSurfaceCrud` throws at startup — `EnableApiKeyAuth` requires a registered validator |
 | `IApiKeyValidator` registered | Validator determines validity |
 | Missing or invalid API key | HTTP 401 Unauthorized |
+
+The validator is resolved from the request's service scope on every call, so scoped (e.g. DbContext-backed) validators work correctly.
 
 ---
 
@@ -331,7 +341,7 @@ When multiple security layers are active, they are evaluated in this order:
 2. **Tenant isolation** — Tenant claim validation and filter
 3. **Row-level security** — `IResourceFilter<T>` query filter
 4. **Resource authorization** — `IResourceAuthorizer<T>` instance check
-5. **Field authorization** — `IFieldAuthorizer` per-field check (on response)
+5. **Field authorization** — `IFieldAuthorizer` per-field check (writes are validated against the request body; reads are redacted on the response, including Create/Update responses)
 
 A failure at any layer short-circuits the request.
 

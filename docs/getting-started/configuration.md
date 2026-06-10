@@ -49,7 +49,10 @@ app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 Key settings:
 - **`ApiPrefix`** — Base route prefix for all endpoints
 - **`MapDynamicCatchAll`** — Whether to enable `/api/d/{route}` for dynamic resources
+- **`MapSchemaEndpoint`** — `GET /api/$schema/{resource}` is mapped by default; set to `false` to disable
 - **Feature toggles** — PUT, import/export, rate limiting, API keys
+
+Note: `ThrowOnRouteCollision` defaults to `true` — duplicate routes fail fast at mapping time.
 
 ---
 

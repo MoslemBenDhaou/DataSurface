@@ -47,7 +47,8 @@ public sealed record ResourceContract(
     IReadOnlyList<FieldContract> Fields,                   // All scalar fields
     IReadOnlyList<RelationContract> Relations,             // All navigation properties
     IReadOnlyDictionary<CrudOperation, OperationContract> Operations,  // Per-operation config
-    SecurityContract Security                              // Authorization policies
+    SecurityContract Security,                             // Authorization policies
+    TenantContract? Tenant = null                          // Optional tenant isolation config
 );
 ```
 
@@ -183,6 +184,19 @@ public sealed record SecurityContract(
 );
 ```
 
+### TenantContract
+
+```csharp
+public sealed record TenantContract(
+    string FieldName,       // CLR property name of the tenant field
+    string FieldApiName,    // API name of the tenant field
+    string ClaimType,       // Claim used to resolve the caller's tenant
+    bool Required           // Whether a tenant value is required
+);
+```
+
+Tenant fields are always server-managed: both contract builders force them out of the create/update input shapes, so clients can never write them.
+
 ### ConcurrencyContract
 
 ```csharp
@@ -192,6 +206,8 @@ public sealed record ConcurrencyContract(
     bool RequiredOnUpdate       // Whether token is required on PATCH
 );
 ```
+
+Concurrency token fields are auto-exposed as read-only fields in read responses, so clients can always obtain the current token.
 
 ---
 
@@ -257,11 +273,13 @@ These defaults are enforced unless explicitly relaxed:
 | **Opt-in exposure** | Only `[CrudResource]` classes become endpoints |
 | **Field allowlist** | Only annotated fields are accepted/emitted |
 | **Unknown field rejection** | Unknown fields in request bodies → 400 |
-| **No nested writes** | Relations written by ID only |
+| **No nested writes** | Relations written by ID only; unknown or inaccessible ids → 400 (targets load through the same tenant/row-level-security/soft-delete scope as reads) |
 | **Controlled expansion** | Allowlist + depth limit (default: 1) |
 | **Required pagination** | All lists are paged (default: 20, max: 200) |
+| **Deterministic ordering** | Every paged query is ordered: requested sort → `DefaultSort` → key tie-breaker |
+| **Tenant fields server-managed** | Tenant fields are never client-writable |
 | **Filter/sort allowlists** | Only explicitly allowed fields |
-| **Startup validation** | Invalid contracts fail fast with diagnostics |
+| **Startup validation** | Invalid contracts fail fast with diagnostics (duplicate resource keys, invalid `DefaultSort`, unreachable concurrency tokens, relations targeting unregistered types, …) |
 
 ---
 

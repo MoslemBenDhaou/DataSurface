@@ -59,7 +59,8 @@ public interface IResourceAuthorizer
     /// Determines whether the current user is authorized to perform an operation on a resource.
     /// </summary>
     /// <param name="contract">The resource contract.</param>
-    /// <param name="entity">The entity instance being accessed (null for Create/List operations).</param>
+    /// <param name="entity">The entity instance being accessed. For Create this is the to-be-created
+    /// (not yet persisted) instance; for List it is <see langword="null"/>.</param>
     /// <param name="operation">The CRUD operation being performed.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>An authorization result indicating success or failure with reason.</returns>
@@ -109,7 +110,8 @@ public interface IResourceAuthorizer<TEntity> where TEntity : class
     /// Determines whether the current user is authorized to perform an operation on the entity.
     /// </summary>
     /// <param name="contract">The resource contract.</param>
-    /// <param name="entity">The entity instance (null for Create/List operations).</param>
+    /// <param name="entity">The entity instance. For Create this is the to-be-created (not yet
+    /// persisted) instance; for List it is <see langword="null"/>.</param>
     /// <param name="operation">The CRUD operation being performed.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>An authorization result indicating success or failure with reason.</returns>

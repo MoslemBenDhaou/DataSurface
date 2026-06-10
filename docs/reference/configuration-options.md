@@ -17,7 +17,7 @@ builder.Services.AddDataSurfaceEfCore(opt =>
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `Features` | `DataSurfaceFeatures` | `Minimal` | Feature flags — see [Feature Flags](../features/feature-flags.md) |
+| `Features` | `DataSurfaceFeatures` | *(all flags enabled)* | Feature flags — see [Feature Flags](../features/feature-flags.md) |
 | `AssembliesToScan` | `Assembly[]` | `[]` | Assemblies to scan for `[CrudResource]` classes |
 | `AutoRegisterCrudEntities` | `bool` | `false` | Auto-register discovered resource types in the EF model |
 | `EnableSoftDeleteFilter` | `bool` | `false` | Apply `ISoftDelete` global query filter |
@@ -32,6 +32,8 @@ builder.Services.AddDataSurfaceEfCore(opt =>
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ExposeFieldsOnlyWhenAnnotated` | `bool` | `true` | Only expose properties with `[CrudField]` |
+| `DefaultIncludeScalarsInRead` | `bool` | `false` | When `ExposeFieldsOnlyWhenAnnotated` is `false`, include un-annotated scalar properties in the Read shape |
+| `UseCamelCaseApiNames` | `bool` | `true` | Generate camelCase API names from CLR property names (synced from `DataSurfaceEfCoreOptions.UseCamelCaseApiNames`) |
 
 ---
 
@@ -53,12 +55,13 @@ app.MapDataSurfaceCrud(new DataSurfaceHttpOptions
 | `MapDynamicCatchAll` | `bool` | `false` | Map `/api/d/{route}` for dynamic resources (opt-in) |
 | `DynamicPrefix` | `string` | `"/d"` | Route prefix for dynamic resources |
 | `MapResourceDiscoveryEndpoint` | `bool` | `false` | Enable `GET /api/$resources` |
+| `MapSchemaEndpoint` | `bool` | `true` | Map `GET /api/$schema/{resourceKey}`. Schema and discovery endpoints participate in the same default authorization / API key / rate limiting as CRUD endpoints |
 | `RequireAuthorizationByDefault` | `bool` | `false` | Require auth on all endpoints |
 | `DefaultPolicy` | `string?` | `null` | Default ASP.NET Core authorization policy |
 | `EnableEtags` | `bool` | `false` | Include ETag headers in responses |
 | `EnableConditionalGet` | `bool` | `false` | Support `If-None-Match` → 304 responses |
-| `CacheControlMaxAgeSeconds` | `int` | `0` | `Cache-Control: max-age=N` for GET responses (0 disables the header) |
-| `ThrowOnRouteCollision` | `bool` | `false` | Fail startup on duplicate routes |
+| `CacheControlMaxAgeSeconds` | `int` | `0` | `Cache-Control: private, max-age=N` for GET responses (0 disables the header) |
+| `ThrowOnRouteCollision` | `bool` | `true` | Fail at mapping time on duplicate routes (a collision would otherwise surface as a 500 at request time) |
 | `EnablePutForFullUpdate` | `bool` | `false` | Enable PUT endpoints for full replacement |
 | `EnableBulkOperations` | `bool` | `false` | Map bulk endpoints (`POST /api/{resource}/bulk`) |
 | `EnableStreaming` | `bool` | `false` | Map streaming endpoints (`GET /api/{resource}/stream`) |
@@ -103,6 +106,7 @@ app.MapDataSurfaceAdmin(new DataSurfaceAdminOptions
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `Prefix` | `string` | `"/admin/ds"` | Route prefix for admin endpoints |
+| `Schema` | `string` | `"dbo"` | Database schema for dynamic metadata tables |
 | `RequireAuthorization` | `bool` | `true` | Require auth on admin endpoints |
 | `Policy` | `string?` | `null` | ASP.NET Core authorization policy for admin access |
 
@@ -125,6 +129,7 @@ builder.Services.Configure<DataSurfaceCacheOptions>(options =>
     options.DefaultCacheDuration = TimeSpan.FromMinutes(5);
     options.ResourceConfigs["Product"] = new ResourceCacheConfig
     {
+        Enabled = true,
         Duration = TimeSpan.FromMinutes(30),
         CacheList = true,
         CacheGet = true
@@ -136,12 +141,14 @@ builder.Services.Configure<DataSurfaceCacheOptions>(options =>
 |----------|------|---------|-------------|
 | `EnableQueryCaching` | `bool` | `false` | Enable server-side query result caching |
 | `DefaultCacheDuration` | `TimeSpan` | 5 minutes | Default cache duration for all resources |
+| `CacheKeyPrefix` | `string` | `"ds:"` | Prefix for generated cache keys |
 | `ResourceConfigs` | `Dictionary<string, ResourceCacheConfig>` | `{}` | Per-resource cache configuration |
 
 ### ResourceCacheConfig
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `Duration` | `TimeSpan` | *(uses default)* | Cache duration for this resource |
-| `CacheList` | `bool` | `true` | Cache list query results |
-| `CacheGet` | `bool` | `true` | Cache individual entity results |
+| `Enabled` | `bool` | `false` | Enable caching for this resource |
+| `Duration` | `TimeSpan?` | `null` *(uses default)* | Cache duration for this resource |
+| `CacheList` | `bool` | `false` | Cache list query results |
+| `CacheGet` | `bool` | `false` | Cache individual entity results |

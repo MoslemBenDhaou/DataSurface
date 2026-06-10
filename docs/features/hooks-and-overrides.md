@@ -35,6 +35,8 @@ public class AuditHook : ICrudHook
 builder.Services.AddScoped<ICrudHook, AuditHook>();
 ```
 
+Global hooks also run on cache hits — a read served from the query cache does not skip them.
+
 ### Entity-Specific Hooks
 
 Run only for a **specific entity type**. Implement `ICrudHook<T>`:
@@ -63,6 +65,8 @@ public class UserHook : ICrudHook<User>
 builder.Services.AddScoped<ICrudHook<User>, UserHook>();
 ```
 
+Typed hooks are resolved by the **contract's CLR type**, so they fire correctly even when EF Core lazy-loading or change-tracking proxies are enabled (the runtime proxy subclass does not matter).
+
 ### Resource-Key Hooks (Dynamic Resources)
 
 For dynamic resources (no CLR type), implement `ICrudHookResource`:
@@ -72,18 +76,20 @@ using DataSurface.Dynamic.Hooks;
 
 public class DynamicAuditHook : ICrudHookResource
 {
-    public Task BeforeCreateAsync(string resourceKey, JsonObject body, CancellationToken ct)
+    public bool AppliesTo(string resourceKey) => true;  // or filter by key
+
+    public Task BeforeCreateAsync(string resourceKey, JsonObject body, CrudHookContext ctx)
     {
         // Logic for dynamic resource creation
         return Task.CompletedTask;
     }
 
-    public Task AfterCreateAsync(string resourceKey, JsonObject entity, CancellationToken ct)
+    public Task AfterCreateAsync(string resourceKey, JsonObject created, CrudHookContext ctx)
     {
         return Task.CompletedTask;
     }
 
-    // Before/After for Read, Update, Delete also available
+    // Before/After for Read, Update, Delete also available (default no-op implementations)
 }
 ```
 
@@ -101,7 +107,9 @@ The `CrudHookContext` provides access to:
 
 - `Contract` — The ResourceContract for the current resource
 - `Operation` — The CRUD operation being performed
-- `CancellationToken` — Cancellation support
+- `Db` — The EF Core `DbContext`
+- `Services` — The scoped `IServiceProvider`
+- `Items` — A dictionary for passing data between layers and hooks
 
 ### Feature Flag
 
@@ -161,11 +169,11 @@ opt.Features.EnableOverrides = true;  // default: true in Standard/Full
 
 When an override is registered for a resource+operation:
 
-1. **Before hooks** still run before the override
+1. **Global before hooks** (`ICrudHook.BeforeAsync`) still run before the override
 2. **The override** runs instead of the default implementation
-3. **After hooks** still run after the override
+3. **Global after hooks** (`ICrudHook.AfterAsync`) still run after the override
 
-This allows cross-cutting hooks (audit, logging) to remain active even when the core logic is overridden.
+This allows cross-cutting global hooks (audit, logging) to remain active even when the core logic is overridden. Entity-specific hooks (`ICrudHook<T>`) do **not** run around overrides — they are part of the default implementation that the override replaces.
 
 ---
 

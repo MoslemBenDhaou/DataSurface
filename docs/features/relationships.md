@@ -71,6 +71,8 @@ Automatically expand a relation without the client requesting it:
 public User Author { get; set; } = default!;
 ```
 
+`DefaultExpanded` requires `ReadExpandAllowed = true` — this is validated at startup.
+
 ### Depth Limit
 
 Maximum expansion depth is configurable per resource to prevent deep recursive loading:
@@ -120,6 +122,8 @@ public User Author { get; set; } = default!;
 }
 ```
 
+The target entity must exist **and be visible to the caller** — targets are loaded through the same tenant isolation, row-level security, and soft-delete scope as reads. An unknown or inaccessible id returns 400 with the write field name (`authorId`) in `errors`.
+
 ### ByIdList — Many-to-Many
 
 For `ManyToMany` relations, write an array of IDs:
@@ -136,6 +140,8 @@ public List<Tag> Tags { get; set; } = new();
   "tagIds": [1, 2, 3]
 }
 ```
+
+Every requested id must resolve to an existing, visible row (tenant/row-level-security/soft-delete scoped). If any id is unknown or inaccessible, the request fails with 400 and the write field name (`tagIds`) in `errors` — ids are never silently dropped. Target ids are matched against the target resource's contract key, falling back to the `Id` / `{TypeName}Id` convention.
 
 ### Required on Create
 
@@ -169,6 +175,7 @@ public User Author { get; set; } = default!;
 | Properties without `[CrudRelation]` | Not included in writes, not expanded |
 | Write mode default | `None` — no writes unless explicitly enabled |
 | Nested object writes | Not allowed — relations are written by ID only |
+| Relation write targets | Must exist and be visible (tenant/RLS/soft-delete scoped) — otherwise 400 |
 | Expansion | Requires `ReadExpandAllowed = true` |
 | Depth | Max 1 level by default |
 

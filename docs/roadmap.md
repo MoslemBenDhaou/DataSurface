@@ -30,10 +30,10 @@ Have a request? Open an issue with the `enhancement` label.
 
 - **Fluent configuration API** — `builder.Resource<T>().Field(x => x.Name).Required().MaxLength(200)` as an alternative to attributes.
 - **Single-call registration** — a unified `AddDataSurface()` that wires all services, reducing manual registration boilerplate.
-- **Expanded Roslyn analyzers & code fixes** — diagnostics for missing `[CrudKey]`, invalid `[CrudField]` flag combinations, with quick-fixes.
+- **Roslyn code fixes & expanded analyzers** — the source generator now ships compile-time diagnostics (`DSG001`–`DSG009`: missing key, duplicate API names, invalid identifiers, …); remaining: quick-fixes, and analyzer coverage for projects that don't use the generator.
 - **Typed client SDK generation** — strongly-typed C# HTTP clients (and optional TypeScript types) generated from contracts.
 - **`dotnet new` templates** — `datasurface-api` and `datasurface-entity` scaffolds.
-- **Hot-reload for dynamic contracts** — detect `EntityDef`/`PropertyDef` changes and refresh routes/contracts without restart.
+- **Proactive dynamic-contract refresh** — per-request hot-reload already works (cached dynamic contracts are stamped with the definition row's `UpdatedAt` and rebuilt on change; catch-all routes pick up new definitions per request); remaining: proactively refreshing the discovery cache so newly created entities appear in `$resources` before their first request.
 - **Pipeline visualization** — a diagnostic endpoint listing the active hooks, filters, authorizers, and cache layers for a resource.
 - **Contract diff / changelog** — structured diff between contract versions with breaking-change detection for CI gates.
 

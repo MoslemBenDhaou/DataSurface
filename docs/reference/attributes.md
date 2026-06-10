@@ -15,6 +15,7 @@ Marks a class as a CRUD resource. Applied to the entity class.
     KeyProperty = "Id",
     MaxPageSize = 200,
     MaxExpandDepth = 1,
+    DefaultSort = "-createdAt",
     EnableList = true,
     EnableGet = true,
     EnableCreate = true,
@@ -28,9 +29,10 @@ public class User { }
 | `route` *(positional)* | `string` | *(required)* | URL segment (e.g., `"users"`) |
 | `ResourceKey` | `string` | Class name | Stable identifier used in contracts and hooks |
 | `Backend` | `StorageBackend` | `EfCore` | Storage backend type |
-| `KeyProperty` | `string` | `"Id"` | Override primary key property discovery |
+| `KeyProperty` | `string` | *(discovered)* | Override primary key property discovery (`[CrudKey]` → `Id` → `{TypeName}Id`, case-insensitive) |
 | `MaxPageSize` | `int` | `200` | Maximum items per page for list queries |
 | `MaxExpandDepth` | `int` | `1` | Maximum relation expansion depth |
+| `DefaultSort` | `string?` | `null` | Sort applied to list queries when the client sends none (e.g., `"-createdAt,name"`); fields must be sortable. The key is always appended as a final tie-breaker for deterministic paging |
 | `EnableList` | `bool` | `true` | Enable `GET /api/{route}` |
 | `EnableGet` | `bool` | `true` | Enable `GET /api/{route}/{id}` |
 | `EnableCreate` | `bool` | `true` | Enable `POST /api/{route}` |
@@ -91,8 +93,8 @@ public string Email { get; set; } = default!;
 | `AllowedValues` | `string?` | `null` | Pipe-separated allowed values (e.g., `"Active\|Inactive"`) |
 | `MinLength` | `int?` | `null` | Minimum string length |
 | `MaxLength` | `int?` | `null` | Maximum string length |
-| `Min` | `double?` | `null` | Minimum numeric value |
-| `Max` | `double?` | `null` | Maximum numeric value |
+| `Min` | `decimal?` | `null` | Minimum numeric value |
+| `Max` | `decimal?` | `null` | Maximum numeric value |
 | `Regex` | `string?` | `null` | Regular expression pattern |
 
 ### CrudDto Flags
@@ -131,7 +133,7 @@ public User Author { get; set; } = default!;
 | `Kind` | `RelationKind` | *(inferred)* | Cardinality: `ManyToOne`, `OneToMany`, `ManyToMany`, `OneToOne` |
 | `ReadExpandAllowed` | `bool` | `false` | Can use `?expand=relation` |
 | `DefaultExpanded` | `bool` | `false` | Automatically expanded without requesting |
-| `WriteMode` | `RelationWriteMode` | `None` | How writes are performed |
+| `WriteMode` | `RelationWriteMode` | `NestedDisabled` | How writes are performed |
 | `WriteFieldName` | `string?` | `null` | API field name for writes (e.g., `"authorId"`) |
 | `RequiredOnCreate` | `bool` | `false` | Write field required on POST |
 | `ForeignKeyProperty` | `string?` | `null` | CLR FK property name |
@@ -158,24 +160,29 @@ public byte[] RowVersion { get; set; } = default!;
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
+| `Mode` | `ConcurrencyMode` | `RowVersion` | Concurrency mechanism (`None`, `RowVersion`, `ETag`) |
 | `RequiredOnUpdate` | `bool` | `true` | Whether `If-Match` header is required on PATCH/PUT |
+
+If the token property has no `[CrudField]` of its own, it is automatically exposed as a
+read-only field so clients can obtain the token.
 
 ---
 
 ## `[CrudAuthorize]`
 
-Sets authorization policies per operation. Can be applied multiple times.
+Sets authorization policies per operation. Can be applied multiple times. Class-wide policies
+(no `Operation`) are applied first, so per-operation policies always win.
 
 ```csharp
-[CrudAuthorize(Policy = "AdminOnly")]
-[CrudAuthorize(Operation = CrudOperation.Delete, Policy = "SuperAdmin")]
+[CrudAuthorize("AdminOnly")]
+[CrudAuthorize("SuperAdmin", Operation = CrudOperation.Delete)]
 public class User { }
 ```
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `Policy` | `string?` | `null` | ASP.NET Core authorization policy name |
-| `Operation` | `CrudOperation?` | `null` | Specific operation (null = all operations) |
+| `policy` *(positional)* | `string` | *(required)* | ASP.NET Core authorization policy name |
+| `Operation` | `CrudOperation` | *(unset — all operations)* | Specific operation; `HasOperation` reports whether it was set |
 
 ---
 
@@ -191,7 +198,10 @@ public string TenantId { get; set; } = default!;
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ClaimType` | `string` | `"tenant_id"` | Claim type to extract tenant ID from |
-| `Required` | `bool` | `false` | Reject requests without the tenant claim (401) |
+| `Required` | `bool` | `true` | Reject requests without the tenant claim; if `false`, operations proceed without tenant filtering |
+
+The tenant field is always server-managed: it is forced read-only in the contract and can never
+be set by clients, regardless of `[CrudField]` flags.
 
 ---
 

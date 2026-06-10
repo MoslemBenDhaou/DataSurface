@@ -195,11 +195,10 @@ public sealed class EfCrudMapper
         var cc = contract.Operations[CrudOperation.Update].Concurrency;
         if (cc == null || cc.Mode == ConcurrencyMode.None) return;
 
+        // Missing token is rejected earlier by ValidateBody when RequiredOnUpdate is set;
+        // nothing to apply here either way.
         if (!body.TryGetPropertyValue(cc.FieldApiName, out var tokenNode))
-        {
-            if (cc.RequiredOnUpdate) return; // Phase 3 will turn this into 400
             return;
-        }
 
         // Typical RowVersion: API sends base64 string
         if (cc.Mode == ConcurrencyMode.RowVersion)

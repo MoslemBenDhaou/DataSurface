@@ -94,7 +94,7 @@ The handler resolves the `ResourceContract` by route (for static) or resource ke
 - **Dynamic resources** — resolved from `DynamicContractProvider` (database-backed)
 - **Composite** — `CompositeResourceContractProvider` checks both sources
 
-If the requested operation is disabled in the contract (e.g., `EnableDelete = false`), the request is rejected with `405 Method Not Allowed`.
+If the requested operation is disabled in the contract (e.g., `EnableDelete = false`), the service throws `CrudOperationDisabledException`, which the error mapper returns as a `400` problem response. (Generic `InvalidOperationException`/`ArgumentException` are treated as server bugs and map to safe `500`s.)
 
 ### 3. Validation (Write Operations)
 
@@ -118,8 +118,8 @@ Security checks run in this order:
 1. **Authorization policy** — ASP.NET Core policy from `[CrudAuthorize]` / `SecurityContract`
 2. **Tenant isolation** — `[CrudTenant]` attribute filters and sets tenant context
 3. **Row-level security** — `IResourceFilter<T>` applies query-level filters
-4. **Resource authorization** — `IResourceAuthorizer<T>` checks instance-level access
-5. **Field authorization** — `IFieldAuthorizer` controls per-field read/write access
+4. **Resource authorization** — `IResourceAuthorizer<T>` checks instance-level access on every operation: Get/Update/Delete, Create (with the to-be-created instance), and per item on List results
+5. **Field authorization** — `IFieldAuthorizer` controls per-field read/write access; redaction applies to read **and** create/update responses (and the webhook payloads built from them)
 
 ### 5. Hooks (Before)
 
@@ -139,7 +139,7 @@ The `CrudOverrideRegistry` is checked for a registered override for this resourc
 
 The actual database operation runs:
 
-- **List** — Query engine applies filters, sorting, pagination, and search to `IQueryable`
+- **List** — Query engine applies filters, sorting, pagination, and search to `IQueryable`; ordering is always deterministic — the requested sort, else the contract's `DefaultSort`, with the key appended as a final tie-breaker before `Skip`/`Take`
 - **Get** — Entity resolved by ID, security filters applied
 - **Create** — Body mapped to entity, default values applied, entity added to DbContext
 - **Update** — Entity loaded, body fields merged, concurrency checked
@@ -182,7 +182,7 @@ Request → Parse QuerySpec → Resolve Contract → Security Filters → Query 
     → Field Projection → Field Authorization → Computed Fields → Cache → Respond
 ```
 
-For cached reads, the cache is checked before query execution. On cache hit, the response is served directly.
+For cached reads, the cache is checked before query execution. Global hooks run **before** the cache check (a cache hit cannot silently skip them), and cache hits still write audit entries; on a hit, the cached response is then served without executing the query.
 
 ## Write Operations (Create / Update / Delete)
 

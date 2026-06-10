@@ -22,6 +22,7 @@ builder.Services.AddSwaggerGen(swagger =>
 - **`PagedResult<T>` schema** — Proper list response wrapper
 - **Query parameter documentation** — Filter operators, sort fields, pagination params
 - **Validation constraints** — `minLength`, `maxLength`, `minimum`, `maximum`, `pattern`, `enum` values from `FieldValidationContract`
+- **Auxiliary endpoint handling** — bulk/import/export/stream/HEAD endpoints carry endpoint-kind metadata so the operation filter documents them correctly: `/bulk` keeps its real `BulkOperationSpec` request schema (it is not overwritten with the Create schema), and export/stream/HEAD are documented with filter and sort parameters but no paging parameters
 
 ### Generated Schema Example
 
@@ -84,6 +85,8 @@ DataSurface provides a built-in JSON Schema endpoint for every resource:
 ```http
 GET /api/$schema/users
 ```
+
+The endpoint is mapped when `DataSurfaceHttpOptions.MapSchemaEndpoint` is `true` (the default) and — like discovery — participates in the same default authorization, API-key authentication, and rate limiting as the CRUD endpoints.
 
 ### Response
 

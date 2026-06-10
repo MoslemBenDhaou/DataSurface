@@ -46,9 +46,11 @@ Published after every create, update, and delete operation:
 |----------|------|-------------|
 | `ResourceKey` | `string` | The resource that changed (e.g., `"User"`) |
 | `Operation` | `CrudOperation` | `Create`, `Update`, or `Delete` |
-| `EntityId` | `string` | ID of the affected entity |
-| `Timestamp` | `DateTimeOffset` | UTC timestamp of the event |
+| `EntityId` | `string?` | ID of the affected entity |
+| `Timestamp` | `DateTime` | UTC timestamp of the event |
 | `Payload` | `JsonObject?` | JSON representation of the entity (for create/update) |
+
+Create/update payloads are built from the API response **after** field-authorization redaction, so fields the caller cannot read never appear in webhook payloads.
 
 ### Example Payload
 
@@ -88,6 +90,7 @@ The `WebhookSubscription` record defines how subscriptions are configured:
 - Webhook publishing is **fire-and-forget** by default
 - Failures are logged but **do not fail** the CRUD operation
 - The CRUD operation completes successfully regardless of webhook delivery status
+- Inside a bulk transaction (`useTransaction = true`), events are buffered and published only **after** the transaction commits — a rolled-back batch publishes nothing
 - Implement retry logic, dead-letter queues, or circuit breakers in your `IWebhookPublisher` as needed
 
 ---

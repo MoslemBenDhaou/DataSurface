@@ -20,7 +20,7 @@ public class User
         RequiredOnCreate = true, MaxLength = 255)]
     public string Email { get; set; } = default!;
 
-    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update,
+    [CrudField(CrudDto.Read | CrudDto.Create | CrudDto.Update | CrudDto.Filter,
         RequiredOnCreate = true)]
     public string Name { get; set; } = default!;
 
@@ -51,18 +51,14 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<AppDbContext>(opt =>
     opt.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
 
-// DataSurface contracts and EF Core services
-builder.Services.AddDataSurfaceEfCore(opt =>
+// DataSurface contracts and EF Core services.
+// The generic overload aliases AppDbContext to the base DbContext the CRUD
+// services depend on, and registers the full CRUD runtime (hooks, overrides,
+// security dispatcher, bulk and streaming services).
+builder.Services.AddDataSurfaceEfCore<AppDbContext>(opt =>
 {
     opt.AssembliesToScan = [typeof(Program).Assembly];
 });
-
-// DataSurface CRUD runtime
-builder.Services.AddScoped<CrudHookDispatcher>();
-builder.Services.AddSingleton<CrudOverrideRegistry>();
-builder.Services.AddScoped<EfDataSurfaceCrudService>();
-builder.Services.AddScoped<IDataSurfaceCrudService>(sp =>
-    sp.GetRequiredService<EfDataSurfaceCrudService>());
 ```
 
 Your `DbContext` should extend `DeclarativeDbContext` to get automatic convention support:
@@ -102,8 +98,8 @@ Your API now has these endpoints:
 | `POST` | `/api/users` | Create a new user |
 | `PATCH` | `/api/users/{id}` | Partial update |
 | `DELETE` | `/api/users/{id}` | Delete user |
-| `GET` | `/api/$schema/users` | JSON Schema for resource |
-| `GET` | `/api/$resources` | List all available resources |
+| `GET` | `/api/$schema/users` | JSON Schema for resource (disable via `MapSchemaEndpoint = false`) |
+| `GET` | `/api/$resources` | List all available resources (opt-in via `MapResourceDiscoveryEndpoint = true`) |
 
 ### Try It
 
@@ -119,10 +115,11 @@ curl "/api/users?filter[name]=contains:alice&sort=-createdAt&page=1&pageSize=10"
 # Get a single user
 curl /api/users/1
 
-# Update a user
+# Update a user — rowVersion comes from a prior GET; it is required on update
+# because the entity has [CrudConcurrency] (RequiredOnUpdate defaults to true)
 curl -X PATCH /api/users/1 \
   -H "Content-Type: application/json" \
-  -d '{"name": "Alice Johnson"}'
+  -d '{"name": "Alice Johnson", "rowVersion": "AAAAAAAAB9E="}'
 
 # Delete a user
 curl -X DELETE /api/users/1

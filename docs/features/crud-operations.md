@@ -27,6 +27,8 @@ Additional endpoints (when enabled):
 | `GET` | `/api/$schema/{resource}` | JSON Schema for resource |
 | `GET` | `/api/$resources` | List all available resources |
 
+`POST` responses return `201 Created` with a relative, URL-encoded `Location` header pointing at the created resource. Create and update responses pass through field-level authorization, so fields the caller cannot read are redacted (see [Security](security.md)).
+
 ---
 
 ## Controlling Available Operations
@@ -104,7 +106,7 @@ Content-Type: application/json
 
 Only `name` is changed; all other fields remain as-is.
 
-**PUT** (full replacement) — All updatable fields must be provided. Missing fields return 400:
+**PUT** (full replacement) — All updatable fields must be provided. Missing fields return 400. Field names in the body are matched case-insensitively, like the rest of the pipeline:
 
 ```http
 PUT /api/products/1
@@ -223,6 +225,7 @@ public class User : ISoftDelete
 
 - **On delete:** `IsDeleted = true` instead of row removal
 - **On queries:** Soft-deleted records are automatically filtered out
+- **On updates:** Soft-deleted records cannot be updated — PATCH/PUT on a soft-deleted row returns 404, just like reads
 - **Disable:** `EnableSoftDeleteFilter = false` in `DataSurfaceEfCoreOptions`
 
 ---
@@ -257,10 +260,10 @@ All CRUD operations are available without HTTP via `IDataSurfaceCrudService`:
 var crudService = serviceProvider.GetRequiredService<IDataSurfaceCrudService>();
 
 // List
-var result = await crudService.ListAsync("User", querySpec, ct);
+var result = await crudService.ListAsync("User", querySpec, expand: null, ct);
 
 // Get
-var user = await crudService.GetAsync("User", entityId, ct);
+var user = await crudService.GetAsync("User", entityId, expand: null, ct);
 
 // Create
 var created = await crudService.CreateAsync("User", jsonBody, ct);
@@ -269,7 +272,7 @@ var created = await crudService.CreateAsync("User", jsonBody, ct);
 var updated = await crudService.UpdateAsync("User", entityId, jsonBody, ct);
 
 // Delete
-await crudService.DeleteAsync("User", entityId, ct);
+await crudService.DeleteAsync("User", entityId, deleteSpec: null, ct);
 ```
 
 Same validation, security, hooks, and contracts apply — no HTTP involved.

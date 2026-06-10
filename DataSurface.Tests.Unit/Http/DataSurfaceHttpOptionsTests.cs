@@ -20,7 +20,9 @@ public class DataSurfaceHttpOptionsTests
         options.RequireAuthorizationByDefault.Should().BeFalse();
         options.DefaultPolicy.Should().BeNull();
         options.EnableEtags.Should().BeFalse();
-        options.ThrowOnRouteCollision.Should().BeFalse();
+        // Route collisions are always configuration errors; failing fast at mapping time is the
+        // safe default (otherwise both endpoints map and requests get AmbiguousMatchException 500s).
+        options.ThrowOnRouteCollision.Should().BeTrue();
     }
 
     [Fact]

@@ -1,37 +1,49 @@
-using System.Linq;
 using Microsoft.CodeAnalysis;
 
 namespace DataSurface.Generator;
 
 /// <summary>
 /// Roslyn symbol/attribute helper extensions used by the source generator.
+/// All attribute matching is done by fully qualified metadata name strings so the generator
+/// never needs a reference to DataSurface.Core.
 /// </summary>
 internal static class SymbolExtensions
 {
     /// <summary>
-    /// Gets the first attribute of the specified <paramref name="attrType"/> applied to the symbol.
+    /// Returns <see langword="true"/> when the attribute's class matches the given fully qualified name.
     /// </summary>
-    /// <param name="s">The symbol to inspect.</param>
-    /// <param name="attrType">The attribute type to look for.</param>
-    /// <returns>The matching attribute data if present; otherwise <c>null</c>.</returns>
-    public static AttributeData? GetAttr(this ISymbol s, INamedTypeSymbol attrType)
-        => s.GetAttributes().FirstOrDefault(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, attrType));
+    /// <param name="a">The attribute data.</param>
+    /// <param name="fullName">Fully qualified attribute type name (for example "DataSurface.Core.Annotations.CrudFieldAttribute").</param>
+    public static bool IsAttribute(this AttributeData a, string fullName)
+        => a.AttributeClass?.ToDisplayString() == fullName;
 
     /// <summary>
-    /// Returns <see langword="true"/> if the symbol has an attribute of the specified <paramref name="attrType"/>.
+    /// Gets the first attribute with the given fully qualified name applied to the symbol, or <c>null</c>.
     /// </summary>
     /// <param name="s">The symbol to inspect.</param>
-    /// <param name="attrType">The attribute type to look for.</param>
-    /// <returns><c>true</c> if present; otherwise <c>false</c>.</returns>
-    public static bool HasAttr(this ISymbol s, INamedTypeSymbol attrType)
-        => s.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, attrType));
+    /// <param name="fullName">Fully qualified attribute type name.</param>
+    public static AttributeData? FindAttribute(this ISymbol s, string fullName)
+    {
+        foreach (var a in s.GetAttributes())
+        {
+            if (a.IsAttribute(fullName)) return a;
+        }
+        return null;
+    }
 
     /// <summary>
-    /// Gets a named argument as a string.
+    /// Returns <see langword="true"/> when the symbol has an attribute with the given fully qualified name.
+    /// </summary>
+    /// <param name="s">The symbol to inspect.</param>
+    /// <param name="fullName">Fully qualified attribute type name.</param>
+    public static bool HasAttribute(this ISymbol s, string fullName)
+        => s.FindAttribute(fullName) is not null;
+
+    /// <summary>
+    /// Gets a named argument as a string, or <c>null</c> when absent.
     /// </summary>
     /// <param name="a">The attribute data.</param>
     /// <param name="name">The named argument key.</param>
-    /// <returns>The string value if present; otherwise <c>null</c>.</returns>
     public static string? GetNamedArgString(this AttributeData a, string name)
     {
         foreach (var kv in a.NamedArguments)
@@ -46,8 +58,7 @@ internal static class SymbolExtensions
     /// </summary>
     /// <param name="a">The attribute data.</param>
     /// <param name="name">The named argument key.</param>
-    /// <param name="fallback">The fallback value returned when the argument is not present.</param>
-    /// <returns>The boolean value if present; otherwise <paramref name="fallback"/>.</returns>
+    /// <param name="fallback">The value returned when the argument is not present.</param>
     public static bool GetNamedArgBool(this AttributeData a, string name, bool fallback = false)
     {
         foreach (var kv in a.NamedArguments)
@@ -58,14 +69,16 @@ internal static class SymbolExtensions
     }
 
     /// <summary>
-    /// Gets a constructor argument as an integer.
+    /// Returns <see langword="true"/> when the attribute carries the given named argument at all.
     /// </summary>
     /// <param name="a">The attribute data.</param>
-    /// <param name="index">The constructor argument index.</param>
-    /// <returns>The integer value if present; otherwise <c>null</c>.</returns>
-    public static int? GetCtorArgInt(this AttributeData a, int index)
+    /// <param name="name">The named argument key.</param>
+    public static bool HasNamedArg(this AttributeData a, string name)
     {
-        if (a.ConstructorArguments.Length <= index) return null;
-        return a.ConstructorArguments[index].Value as int?;
+        foreach (var kv in a.NamedArguments)
+        {
+            if (kv.Key == name) return true;
+        }
+        return false;
     }
 }

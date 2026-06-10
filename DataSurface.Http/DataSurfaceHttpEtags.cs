@@ -44,6 +44,10 @@ public static class DataSurfaceHttpEtags
     /// </summary>
     /// <param name="req">The incoming HTTP request.</param>
     /// <returns>The token value if present; otherwise <c>null</c>.</returns>
+    /// <remarks>
+    /// <c>If-Match: *</c> means "proceed if the resource exists" (RFC 9110) and yields no token —
+    /// the by-id lookup already guarantees existence, so no concurrency check applies.
+    /// </remarks>
     public static string? GetIfMatchToken(HttpRequest req)
     {
         if (!req.Headers.TryGetValue("If-Match", out var v)) return null;
@@ -52,13 +56,48 @@ public static class DataSurfaceHttpEtags
 
         raw = raw.Trim();
 
-        // W/"...":
-        if (raw.StartsWith("W/\"", StringComparison.OrdinalIgnoreCase) && raw.EndsWith("\""))
-            return raw.Substring(3, raw.Length - 4);
+        // RFC 9110: '*' matches any current representation; it is not a literal token.
+        if (raw == "*") return null;
 
-        // "..."
-        if (raw.StartsWith("\"") && raw.EndsWith("\""))
-            return raw.Substring(1, raw.Length - 2);
+        return StripEtagDecorations(raw);
+    }
+
+    /// <summary>
+    /// Compares an <c>If-None-Match</c> header (which may carry a comma-separated list, weak
+    /// prefixes, or <c>*</c>) against the response ETag using weak comparison.
+    /// </summary>
+    /// <param name="ifNoneMatch">The raw If-None-Match header values.</param>
+    /// <param name="etag">The ETag of the current representation.</param>
+    public static bool IfNoneMatchMatches(Microsoft.Extensions.Primitives.StringValues ifNoneMatch, string etag)
+    {
+        if (ifNoneMatch.Count == 0) return false;
+
+        var current = StripEtagDecorations(etag.Trim());
+
+        foreach (var headerValue in ifNoneMatch)
+        {
+            if (string.IsNullOrWhiteSpace(headerValue)) continue;
+
+            foreach (var candidate in headerValue.Split(','))
+            {
+                var trimmed = candidate.Trim();
+                if (trimmed.Length == 0) continue;
+                if (trimmed == "*") return true;
+                if (StripEtagDecorations(trimmed) == current) return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Removes the weak prefix and surrounding quotes (weak comparison per RFC 9110 §8.8.3.2).
+    private static string StripEtagDecorations(string raw)
+    {
+        if (raw.StartsWith("W/", StringComparison.OrdinalIgnoreCase))
+            raw = raw[2..].Trim();
+
+        if (raw.Length >= 2 && raw.StartsWith('"') && raw.EndsWith('"'))
+            return raw[1..^1];
 
         return raw;
     }
@@ -79,7 +118,8 @@ public static class DataSurfaceHttpEtags
         var cc = c.Operations.TryGetValue(CrudOperation.Update, out var oc) ? oc.Concurrency : null;
         if (cc is null || cc.Mode != ConcurrencyMode.RowVersion) return;
 
-        if (patch.ContainsKey(cc.FieldApiName)) return;
+        // Case-insensitive: the rest of the pipeline matches body keys case-insensitively.
+        if (patch.Any(kv => string.Equals(kv.Key, cc.FieldApiName, StringComparison.OrdinalIgnoreCase))) return;
 
         var token = GetIfMatchToken(req);
         if (!string.IsNullOrWhiteSpace(token))

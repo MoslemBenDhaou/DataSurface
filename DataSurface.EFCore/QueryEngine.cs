@@ -1,4 +1,4 @@
-﻿using System.Linq.Expressions;
+using System.Linq.Expressions;
 using DataSurface.Core.Contracts;
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Exceptions;
@@ -17,6 +17,11 @@ namespace DataSurface.EFCore;
 public sealed class EfCrudQueryEngine
 {
     private readonly bool _strict;
+
+    private static readonly HashSet<string> KnownOps = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "eq", "neq", "gt", "gte", "lt", "lte", "contains", "starts", "ends", "in", "isnull"
+    };
 
     /// <summary>
     /// Creates a new query engine.
@@ -42,6 +47,9 @@ public sealed class EfCrudQueryEngine
     ///   (defaults to equality).
     /// - Sort supports comma-separated fields with optional <c>-</c> prefix for descending order (for example
     ///   <c>"title,-id"</c>).
+    /// - When neither the request nor the contract specifies a sort, results are ordered by the key;
+    ///   the key is always appended as a final tie-breaker. Skip/Take without a deterministic ORDER BY
+    ///   produces nondeterministic pages (rows repeated or skipped).
     /// </remarks>
     public IQueryable<TEntity> Apply<TEntity>(
         IQueryable<TEntity> query,
@@ -52,9 +60,19 @@ public sealed class EfCrudQueryEngine
         var page = Math.Max(1, spec.Page);
         var pageSize = Math.Clamp(spec.PageSize, 1, contract.Query.MaxPageSize);
 
-        query = ApplyFiltersAndSort(query, contract, spec);
+        if (spec.Filters != null && spec.Filters.Count > 0)
+            query = ApplyFilters(query, contract, spec.Filters);
 
-        return query.Skip((page - 1) * pageSize).Take(pageSize);
+        if (!string.IsNullOrWhiteSpace(spec.Search))
+            query = ApplySearch(query, contract, spec.Search!);
+
+        query = ApplyDeterministicSort(query, contract, spec);
+
+        // (page-1)*pageSize can overflow int for hostile page values; compute in long and clamp.
+        var skip = (long)(page - 1) * pageSize;
+        if (skip > int.MaxValue) skip = int.MaxValue;
+
+        return query.Skip((int)skip).Take(pageSize);
     }
 
     /// <summary>
@@ -73,8 +91,38 @@ public sealed class EfCrudQueryEngine
         if (!string.IsNullOrWhiteSpace(spec.Search))
             query = ApplySearch(query, contract, spec.Search!);
 
-        if (!string.IsNullOrWhiteSpace(spec.Sort))
-            query = ApplySort(query, contract, spec.Sort!);
+        var sort = EffectiveSort(contract, spec);
+        if (!string.IsNullOrWhiteSpace(sort))
+            query = ApplySort(query, contract, sort!, out _);
+
+        return query;
+    }
+
+    // The requested sort wins; the contract's DefaultSort fills in when the client sent none.
+    private static string? EffectiveSort(ResourceContract contract, QuerySpec spec)
+        => !string.IsNullOrWhiteSpace(spec.Sort) ? spec.Sort : contract.Query.DefaultSort;
+
+    // Applies the effective sort and guarantees a deterministic total order by appending the
+    // key as a final tie-breaker (or as the only ordering when no sort applies at all).
+    private IQueryable<TEntity> ApplyDeterministicSort<TEntity>(
+        IQueryable<TEntity> query,
+        ResourceContract contract,
+        QuerySpec spec)
+        where TEntity : class
+    {
+        var sort = EffectiveSort(contract, spec);
+        var sortedByKey = false;
+        var applied = false;
+
+        if (!string.IsNullOrWhiteSpace(sort))
+        {
+            query = ApplySort(query, contract, sort!, out var appliedFields);
+            applied = appliedFields.Count > 0;
+            sortedByKey = appliedFields.Any(f => f.Equals(contract.Key.Name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!sortedByKey && typeof(TEntity).GetProperty(contract.Key.Name) is not null)
+            query = ApplyOrder(query, contract.Key.Name, desc: false, first: !applied);
 
         return query;
     }
@@ -140,7 +188,7 @@ public sealed class EfCrudQueryEngine
 
             // format: "op:value" or "value" => default eq
             var (op, value) = ParseOp(raw);
-            var expr = BuildPredicate<TEntity>(param, field.Name, op, value);
+            var expr = BuildPredicate<TEntity>(param, field.Name, apiField, op, value);
 
             combined = combined == null ? expr : Expression.AndAlso(combined, expr);
         }
@@ -151,16 +199,24 @@ public sealed class EfCrudQueryEngine
         return query.Where(lambda);
     }
 
+    // Only a known operator prefix is treated as an operator; anything else is an equality
+    // value. Without the whitelist, plain values containing ':' (ISO timestamps, URNs,
+    // "ns:key" strings) would be torn apart at the first colon.
     private static (string op, string value) ParseOp(string raw)
     {
         var idx = raw.IndexOf(':');
         if (idx <= 0) return ("eq", raw);
-        return (raw[..idx].Trim(), raw[(idx + 1)..].Trim());
+
+        var prefix = raw[..idx].Trim();
+        if (!KnownOps.Contains(prefix)) return ("eq", raw);
+
+        return (prefix, raw[(idx + 1)..].Trim());
     }
 
     private static Expression BuildPredicate<TEntity>(
         ParameterExpression param,
         string clrPropName,
+        string apiField,
         string op,
         string rawValue)
     {
@@ -172,6 +228,9 @@ public sealed class EfCrudQueryEngine
         // Handle isnull operator
         if (op.Equals("isnull", StringComparison.OrdinalIgnoreCase))
         {
+            if (propType.IsValueType && Nullable.GetUnderlyingType(propType) is null)
+                throw FilterError(apiField, "Operator 'isnull' is not supported for non-nullable fields.");
+
             var isNull = rawValue.Equals("true", StringComparison.OrdinalIgnoreCase);
             var nullConstant = Expression.Constant(null, propType);
             return isNull
@@ -183,8 +242,8 @@ public sealed class EfCrudQueryEngine
         if (op.Equals("in", StringComparison.OrdinalIgnoreCase))
         {
             var values = rawValue.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            var typedValues = values.Select(v => nonNull == typeof(string) ? v : ConvertTo(nonNull, v)).ToList();
-            
+            var typedValues = values.Select(v => nonNull == typeof(string) ? v : ConvertTo(nonNull, v, apiField)).ToList();
+
             Expression? inExpr = null;
             foreach (var val in typedValues)
             {
@@ -196,9 +255,17 @@ public sealed class EfCrudQueryEngine
             return inExpr ?? Expression.Constant(false);
         }
 
+        var lowerOp = op.ToLowerInvariant();
+
+        // Operator/type compatibility — turn user errors into 400s, not expression-tree 500s.
+        if (lowerOp is "gt" or "gte" or "lt" or "lte" && !IsComparable(nonNull))
+            throw FilterError(apiField, $"Operator '{lowerOp}' is not supported for this field type.");
+        if (lowerOp is "contains" or "starts" or "ends" && nonNull != typeof(string))
+            throw FilterError(apiField, $"Operator '{lowerOp}' is only supported for string fields.");
+
         object? typed = rawValue;
         if (nonNull != typeof(string))
-            typed = ConvertTo(nonNull, rawValue);
+            typed = ConvertTo(nonNull, rawValue, apiField);
 
         var valueConstant = Expression.Constant(typed, nonNull);
 
@@ -206,7 +273,7 @@ public sealed class EfCrudQueryEngine
         if (isNullable && propType.IsValueType)
             leftExpr = Expression.Convert(prop, nonNull);
 
-        return op.ToLowerInvariant() switch
+        return lowerOp switch
         {
             "eq"  => Expression.Equal(leftExpr, valueConstant),
             "neq" => Expression.NotEqual(leftExpr, valueConstant),
@@ -215,52 +282,71 @@ public sealed class EfCrudQueryEngine
             "lt"  => Expression.LessThan(leftExpr, valueConstant),
             "lte" => Expression.LessThanOrEqual(leftExpr, valueConstant),
 
-            "contains" when nonNull == typeof(string)
-                => Expression.Call(leftExpr, nameof(string.Contains), Type.EmptyTypes, valueConstant),
-
-            "starts" when nonNull == typeof(string)
-                => Expression.Call(leftExpr, nameof(string.StartsWith), Type.EmptyTypes, valueConstant),
-
-            "ends" when nonNull == typeof(string)
-                => Expression.Call(leftExpr, nameof(string.EndsWith), Type.EmptyTypes, valueConstant),
+            "contains" => Expression.Call(leftExpr, nameof(string.Contains), Type.EmptyTypes, valueConstant),
+            "starts"   => Expression.Call(leftExpr, nameof(string.StartsWith), Type.EmptyTypes, valueConstant),
+            "ends"     => Expression.Call(leftExpr, nameof(string.EndsWith), Type.EmptyTypes, valueConstant),
 
             _ => Expression.Equal(leftExpr, valueConstant)
         };
     }
 
-    private static object ConvertTo(Type t, string raw)
+    private static bool IsComparable(Type t)
+        => t == typeof(int) || t == typeof(long) || t == typeof(short) || t == typeof(byte)
+        || t == typeof(sbyte) || t == typeof(ushort) || t == typeof(uint) || t == typeof(ulong)
+        || t == typeof(decimal) || t == typeof(double) || t == typeof(float)
+        || t == typeof(DateTime) || t == typeof(DateTimeOffset)
+        || t == typeof(DateOnly) || t == typeof(TimeOnly) || t == typeof(TimeSpan)
+        || t == typeof(char);
+
+    private static CrudRequestValidationException FilterError(string apiField, string message)
+        => new(new Dictionary<string, string[]> { [apiField] = new[] { message } });
+
+    private static object ConvertTo(Type t, string raw, string apiField)
     {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
         try
         {
-            if (t == typeof(int)) return int.Parse(raw);
-            if (t == typeof(long)) return long.Parse(raw);
-            if (t == typeof(decimal)) return decimal.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
-            if (t == typeof(double)) return double.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
-            if (t == typeof(float)) return float.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
+            if (t == typeof(int)) return int.Parse(raw, inv);
+            if (t == typeof(long)) return long.Parse(raw, inv);
+            if (t == typeof(short)) return short.Parse(raw, inv);
+            if (t == typeof(byte)) return byte.Parse(raw, inv);
+            if (t == typeof(sbyte)) return sbyte.Parse(raw, inv);
+            if (t == typeof(ushort)) return ushort.Parse(raw, inv);
+            if (t == typeof(uint)) return uint.Parse(raw, inv);
+            if (t == typeof(ulong)) return ulong.Parse(raw, inv);
+            if (t == typeof(decimal)) return decimal.Parse(raw, inv);
+            if (t == typeof(double)) return double.Parse(raw, inv);
+            if (t == typeof(float)) return float.Parse(raw, inv);
             if (t == typeof(bool)) return bool.Parse(raw);
             if (t == typeof(Guid)) return Guid.Parse(raw);
-            if (t == typeof(DateTime)) return DateTime.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
+            if (t == typeof(DateTime)) return DateTime.Parse(raw, inv, System.Globalization.DateTimeStyles.RoundtripKind);
+            if (t == typeof(DateTimeOffset)) return DateTimeOffset.Parse(raw, inv);
+            if (t == typeof(DateOnly)) return DateOnly.Parse(raw, inv);
+            if (t == typeof(TimeOnly)) return TimeOnly.Parse(raw, inv);
+            if (t == typeof(TimeSpan)) return TimeSpan.Parse(raw, inv);
+            if (t == typeof(char)) return raw.Length == 1 ? raw[0] : throw new FormatException("Expected a single character.");
 
             if (t.IsEnum) return Enum.Parse(t, raw, ignoreCase: true);
 
-            return raw;
+            // Unknown property type: filtering would otherwise blow up inside expression
+            // construction with a 500; reject the request instead.
+            throw FilterError(apiField, $"Filtering is not supported for this field type ({t.Name}).");
         }
         catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentException)
         {
-            throw new CrudRequestValidationException(new Dictionary<string, string[]>
-            {
-                ["filter"] = new[] { $"Invalid filter value '{raw}' for type {t.Name}." }
-            });
+            throw FilterError(apiField, $"Invalid filter value '{raw}' for type {t.Name}.");
         }
     }
 
     private IQueryable<TEntity> ApplySort<TEntity>(
         IQueryable<TEntity> query,
         ResourceContract contract,
-        string sort)
+        string sort,
+        out List<string> appliedClrFields)
         where TEntity : class
     {
         var allowed = new HashSet<string>(contract.Query.SortableFields, StringComparer.OrdinalIgnoreCase);
+        appliedClrFields = new List<string>();
 
         // sort="title,-id"
         var parts = sort.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -285,6 +371,7 @@ public sealed class EfCrudQueryEngine
             if (field == null) continue;
 
             query = ApplyOrder(query, field.Name, desc, first);
+            appliedClrFields.Add(field.Name);
             first = false;
         }
 

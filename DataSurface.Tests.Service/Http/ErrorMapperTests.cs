@@ -70,19 +70,33 @@ public class ErrorMapperTests
     }
 
     [Fact]
-    public void ArgumentException_Returns400()
+    public void ArgumentException_Returns500WithoutLeakingMessage()
     {
-        var ex = new ArgumentException("Bad argument");
+        // Generic ArgumentException is a server bug (parameter names, internals) — it must not
+        // surface as a client error or leak its message in production.
+        var ex = new ArgumentException("Bad argument with internal details");
 
         var result = DataSurfaceHttpErrorMapper.ToProblem(ex);
 
-        ExtractProblemStatus(result).Should().Be(StatusCodes.Status400BadRequest);
+        ExtractProblemStatus(result).Should().Be(StatusCodes.Status500InternalServerError);
     }
 
     [Fact]
-    public void InvalidOperationException_Returns400()
+    public void InvalidOperationException_Returns500WithoutLeakingMessage()
     {
-        var ex = new InvalidOperationException("Operation 'Delete' is disabled");
+        // Generic InvalidOperationException covers EF translation failures, DI errors, etc. —
+        // internals that must not be returned to clients as 400s.
+        var ex = new InvalidOperationException("The LINQ expression could not be translated");
+
+        var result = DataSurfaceHttpErrorMapper.ToProblem(ex);
+
+        ExtractProblemStatus(result).Should().Be(StatusCodes.Status500InternalServerError);
+    }
+
+    [Fact]
+    public void CrudOperationDisabledException_Returns400()
+    {
+        var ex = new CrudOperationDisabledException("widgets", "Delete");
 
         var result = DataSurfaceHttpErrorMapper.ToProblem(ex);
 

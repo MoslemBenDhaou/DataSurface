@@ -36,7 +36,18 @@ public static class FieldValidator
             // String validations
             if (node is not null && field.Type == FieldType.String)
             {
-                var strVal = node.GetValue<string?>();
+                string? strVal;
+                try
+                {
+                    strVal = node.GetValue<string?>();
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or FormatException)
+                {
+                    // Wrong JSON type (number/bool/object for a string field) is a client
+                    // error, not a 500.
+                    errors[kv.Key] = new[] { "Value must be a string." };
+                    continue;
+                }
                 if (strVal is not null)
                 {
                     if (val.MinLength.HasValue && strVal.Length < val.MinLength.Value)

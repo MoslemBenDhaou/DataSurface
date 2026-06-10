@@ -2,7 +2,10 @@ using System.Text.Json;
 using DataSurface.Admin.Dtos;
 using DataSurface.Admin.Validation;
 using DataSurface.Dynamic.Entities;
+using DataSurface.EFCore.Providers;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Logging;
 
 namespace DataSurface.Admin.Services;
 
@@ -12,12 +15,29 @@ namespace DataSurface.Admin.Services;
 public sealed class DynamicMetadataAdminService
 {
     private readonly DbContext _db;
+    private readonly DynamicIndexRebuildService _reindex;
+    private readonly ILogger<DynamicMetadataAdminService>? _logger;
+    private readonly StaticResourceContractProvider? _staticContracts;
 
     /// <summary>
     /// Creates a new instance of the admin service.
     /// </summary>
     /// <param name="db">The EF Core database context.</param>
-    public DynamicMetadataAdminService(DbContext db) => _db = db;
+    /// <param name="reindex">Service used to rebuild dynamic indexes after schema changes.</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="staticContracts">Optional static contract provider used to reject entity
+    /// keys / routes that collide with statically defined resources.</param>
+    public DynamicMetadataAdminService(
+        DbContext db,
+        DynamicIndexRebuildService reindex,
+        ILogger<DynamicMetadataAdminService>? logger = null,
+        StaticResourceContractProvider? staticContracts = null)
+    {
+        _db = db;
+        _reindex = reindex;
+        _logger = logger;
+        _staticContracts = staticContracts;
+    }
 
     /// <summary>
     /// Lists all dynamic entity definitions.
@@ -54,22 +74,168 @@ public sealed class DynamicMetadataAdminService
     }
 
     /// <summary>
-    /// Creates or updates a dynamic entity definition.
+    /// Creates or updates a dynamic entity definition. When an update changes property
+    /// definitions, the entity's filter/sort indexes are rebuilt automatically (stale index rows
+    /// would otherwise silently return wrong results).
     /// </summary>
     /// <param name="dto">The entity definition to upsert.</param>
     /// <param name="ct">A cancellation token.</param>
     /// <returns>The saved entity definition and any validation errors.</returns>
     public async Task<(AdminEntityDefDto Entity, IDictionary<string, string[]> Errors)> UpsertEntityAsync(AdminEntityDefDto dto, CancellationToken ct)
     {
-        var errors = DynamicMetadataValidator.Validate(dto);
+        var errors = DynamicMetadataValidator.Validate(dto, _staticContracts);
         if (errors.Count > 0) return (dto, errors);
 
-        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await using var tx = await BeginTransactionIfSupportedAsync(ct);
 
+        var needsReindex = await UpsertCoreAsync(dto, ct);
+
+        if (tx is not null) await tx.CommitAsync(ct);
+
+        if (needsReindex)
+        {
+            _logger?.LogInformation("Property definitions of dynamic entity '{EntityKey}' changed; rebuilding indexes.", dto.EntityKey);
+            await _reindex.RebuildEntityAsync(dto.EntityKey, ct);
+        }
+
+        return (await GetEntityAsync(dto.EntityKey, ct) ?? dto, new Dictionary<string, string[]>());
+    }
+
+    /// <summary>
+    /// Deletes a dynamic entity definition, INCLUDING all of its stored records and index rows,
+    /// so data cannot be resurrected by re-creating the same entity key later.
+    /// </summary>
+    /// <param name="entityKey">The entity key to delete.</param>
+    /// <param name="ct">A cancellation token.</param>
+    /// <returns><c>true</c> if the entity existed and was deleted; otherwise <c>false</c>.</returns>
+    public async Task<bool> DeleteEntityAsync(string entityKey, CancellationToken ct)
+    {
+        await using var tx = await BeginTransactionIfSupportedAsync(ct);
+
+        var row = await _db.Set<DsEntityDefRow>()
+            .Include(x => x.Properties)
+            .Include(x => x.Relations)
+            .FirstOrDefaultAsync(x => x.EntityKey == entityKey, ct);
+
+        if (row is null) return false;
+
+        // Purge the data alongside the metadata in the same SaveChanges/transaction.
+        var records = await _db.Set<DsDynamicRecordRow>()
+            .Where(r => r.EntityKey == entityKey)
+            .ToListAsync(ct);
+        var indexRows = await _db.Set<DsDynamicIndexRow>()
+            .Where(r => r.EntityKey == entityKey)
+            .ToListAsync(ct);
+
+        _db.RemoveRange(records);
+        _db.RemoveRange(indexRows);
+        _db.RemoveRange(row.Properties);
+        _db.RemoveRange(row.Relations);
+        _db.Remove(row);
+        await _db.SaveChangesAsync(ct);
+
+        if (tx is not null) await tx.CommitAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Exports all dynamic entity definitions.
+    /// </summary>
+    /// <param name="ct">A cancellation token.</param>
+    /// <returns>The export payload.</returns>
+    public async Task<AdminExportPayloadDto> ExportAsync(CancellationToken ct)
+    {
+        var entities = await ListEntitiesAsync(ct);
+        return new AdminExportPayloadDto { Entities = entities };
+    }
+
+    /// <summary>
+    /// Imports dynamic entity definitions from the provided payload with atomic semantics:
+    /// all entities are validated first (any validation error aborts the import before applying
+    /// anything), then applied inside a single transaction when the provider supports one.
+    /// Per-entity apply failures are collected into the error list instead of aborting with a 500;
+    /// when a transaction is active, any failure rolls the whole import back.
+    /// </summary>
+    /// <param name="payload">The import payload.</param>
+    /// <param name="ct">A cancellation token.</param>
+    /// <returns>The number of imported entities and any per-entity errors.</returns>
+    public async Task<(int Imported, List<(string EntityKey, IDictionary<string, string[]>)> Errors)> ImportAsync(AdminImportPayloadDto payload, CancellationToken ct)
+    {
+        var errs = new List<(string, IDictionary<string, string[]>)>();
+
+        // Phase 1: validate everything before applying anything.
+        foreach (var e in payload.Entities)
+        {
+            var errors = DynamicMetadataValidator.Validate(e, _staticContracts);
+            if (errors.Count > 0) errs.Add((e.EntityKey, errors));
+        }
+        if (errs.Count > 0) return (0, errs);
+
+        // Phase 2: apply.
+        await using var tx = await BeginTransactionIfSupportedAsync(ct);
+
+        var imported = 0;
+        var reindexKeys = new List<string>();
+
+        foreach (var e in payload.Entities)
+        {
+            try
+            {
+                var needsReindex = await UpsertCoreAsync(e, ct);
+                if (needsReindex) reindexKeys.Add(e.EntityKey);
+                imported++;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Import of dynamic entity '{EntityKey}' failed.", e.EntityKey);
+                errs.Add((e.EntityKey, new Dictionary<string, string[]>
+                {
+                    ["import"] = new[] { ex.Message }
+                }));
+                // Drop any partially staged changes so they cannot leak into the next entity's
+                // SaveChanges (relevant for providers without transactions, e.g. InMemory).
+                _db.ChangeTracker.Clear();
+            }
+        }
+
+        if (errs.Count > 0 && tx is not null)
+        {
+            await tx.RollbackAsync(ct);
+            return (0, errs);
+        }
+
+        if (tx is not null) await tx.CommitAsync(ct);
+
+        foreach (var key in reindexKeys)
+        {
+            try
+            {
+                _logger?.LogInformation("Property definitions of dynamic entity '{EntityKey}' changed during import; rebuilding indexes.", key);
+                await _reindex.RebuildEntityAsync(key, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Index rebuild after import failed for dynamic entity '{EntityKey}'.", key);
+            }
+        }
+
+        return (imported, errs);
+    }
+
+    // Core upsert without validation/transaction handling (shared by Upsert and Import).
+    // Returns true when this was an UPDATE that changed property definitions, i.e. the
+    // existing index rows are stale and a rebuild is required.
+    private async Task<bool> UpsertCoreAsync(AdminEntityDefDto dto, CancellationToken ct)
+    {
         var existing = await _db.Set<DsEntityDefRow>()
             .Include(x => x.Properties)
             .Include(x => x.Relations)
             .FirstOrDefaultAsync(x => x.EntityKey == dto.EntityKey, ct);
+
+        var isUpdate = existing is not null;
+        var oldPropertySignature = existing is null
+            ? null
+            : existing.Properties.Select(PropertySignature).OrderBy(x => x, StringComparer.Ordinal).ToList();
 
         if (existing is null)
         {
@@ -129,67 +295,26 @@ public sealed class DynamicMetadataAdminService
         existing.UpdatedAt = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
 
-        return (await GetEntityAsync(dto.EntityKey, ct) ?? dto, new Dictionary<string, string[]>());
+        if (!isUpdate || oldPropertySignature is null) return false;
+
+        var newPropertySignature = dto.Properties.Select(PropertySignature).OrderBy(x => x, StringComparer.Ordinal).ToList();
+        return !oldPropertySignature.SequenceEqual(newPropertySignature, StringComparer.Ordinal);
     }
 
-    /// <summary>
-    /// Deletes a dynamic entity definition.
-    /// </summary>
-    /// <param name="entityKey">The entity key to delete.</param>
-    /// <param name="ct">A cancellation token.</param>
-    /// <returns><c>true</c> if the entity existed and was deleted; otherwise <c>false</c>.</returns>
-    public async Task<bool> DeleteEntityAsync(string entityKey, CancellationToken ct)
-    {
-        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+    // Signature of the property facets that affect index rows (apiName, type and flags).
+    private static string PropertySignature(DsPropertyDefRow p)
+        => $"{p.ApiName}|{p.Type}|{(int)p.InFlags}|{p.Hidden}|{p.Indexed}";
 
-        var row = await _db.Set<DsEntityDefRow>()
-            .Include(x => x.Properties)
-            .Include(x => x.Relations)
-            .FirstOrDefaultAsync(x => x.EntityKey == entityKey, ct);
+    private static string PropertySignature(AdminPropertyDefDto p)
+        => $"{p.ApiName}|{p.Type}|{(int)p.InFlags}|{p.Hidden}|{p.Indexed}";
 
-        if (row is null) return false;
-
-        _db.RemoveRange(row.Properties);
-        _db.RemoveRange(row.Relations);
-        _db.Remove(row);
-        await _db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
-        return true;
-    }
-
-    /// <summary>
-    /// Exports all dynamic entity definitions.
-    /// </summary>
-    /// <param name="ct">A cancellation token.</param>
-    /// <returns>The export payload.</returns>
-    public async Task<AdminExportPayloadDto> ExportAsync(CancellationToken ct)
-    {
-        var entities = await ListEntitiesAsync(ct);
-        return new AdminExportPayloadDto { Entities = entities };
-    }
-
-    /// <summary>
-    /// Imports dynamic entity definitions from the provided payload.
-    /// </summary>
-    /// <param name="payload">The import payload.</param>
-    /// <param name="ct">A cancellation token.</param>
-    /// <returns>The number of imported entities and any per-entity validation errors.</returns>
-    public async Task<(int Imported, List<(string EntityKey, IDictionary<string, string[]>)> Errors)> ImportAsync(AdminImportPayloadDto payload, CancellationToken ct)
-    {
-        var errs = new List<(string, IDictionary<string, string[]>)>();
-        var imported = 0;
-
-        foreach (var e in payload.Entities)
-        {
-            var (saved, errors) = await UpsertEntityAsync(e, ct);
-            if (errors.Count > 0) errs.Add((e.EntityKey, errors));
-            else imported++;
-        }
-
-        return (imported, errs);
-    }
+    // Explicit relational transactions throw on non-relational providers (EF InMemory);
+    // fall back to single-SaveChanges atomicity there.
+    private async Task<IDbContextTransaction?> BeginTransactionIfSupportedAsync(CancellationToken ct)
+        => _db.Database.IsRelational()
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
 
     private static void Apply(AdminEntityDefDto dto, DsEntityDefRow row)
     {

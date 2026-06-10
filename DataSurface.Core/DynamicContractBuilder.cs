@@ -1,3 +1,4 @@
+using DataSurface.Core.ContractBuilderModels;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 
@@ -15,8 +16,43 @@ public sealed class DynamicContractBuilder
     /// </summary>
     /// <param name="def">Runtime definition describing the resource, fields, relations, and operations.</param>
     /// <returns>A normalized resource contract suitable for use by higher layers.</returns>
+    /// <exception cref="ContractValidationException">Thrown when the definition is invalid.</exception>
     public ResourceContract Build(EntityDef def)
     {
+        // Dynamic definitions come from admin/runtime input, so validate before building:
+        // this is the path where malformed metadata is most likely.
+        var errors = new List<string>();
+
+        if (string.IsNullOrWhiteSpace(def.EntityKey))
+            errors.Add("EntityKey is required.");
+        if (string.IsNullOrWhiteSpace(def.Route))
+            errors.Add($"Entity '{def.EntityKey}': Route is required.");
+        if (string.IsNullOrWhiteSpace(def.KeyName))
+            errors.Add($"Entity '{def.EntityKey}': KeyName is required.");
+        if (def.MaxPageSize < 1)
+            errors.Add($"Entity '{def.EntityKey}': MaxPageSize must be at least 1 (was {def.MaxPageSize}).");
+        if (def.MaxExpandDepth < 0 || def.MaxExpandDepth > 3)
+            errors.Add($"Entity '{def.EntityKey}': MaxExpandDepth {def.MaxExpandDepth} is out of the supported range 0..3.");
+
+        foreach (var dup in def.Properties.GroupBy(p => p.ApiName, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            errors.Add($"Entity '{def.EntityKey}': duplicate property apiName '{dup.Key}'.");
+
+        var propApiNames = new HashSet<string>(def.Properties.Select(p => p.ApiName), StringComparer.OrdinalIgnoreCase);
+        foreach (var r in def.Relations)
+        {
+            if (propApiNames.Contains(r.ApiName))
+                errors.Add($"Entity '{def.EntityKey}': relation '{r.ApiName}' collides with a property of the same apiName.");
+            if (r.DefaultExpanded && !r.ExpandAllowed)
+                errors.Add($"Entity '{def.EntityKey}': relation '{r.ApiName}' has DefaultExpanded but ExpandAllowed is false; the default expansion would never happen.");
+        }
+
+        var concurrencyProps = def.Properties.Where(p => p.ConcurrencyToken).ToList();
+        if (concurrencyProps.Count > 1)
+            errors.Add($"Entity '{def.EntityKey}': multiple concurrency-token properties ({string.Join(", ", concurrencyProps.Select(p => p.ApiName))}); only one is allowed.");
+
+        if (errors.Count > 0)
+            throw new ContractValidationException(errors);
+
         var key = new ResourceKeyContract(def.KeyName, def.KeyType);
 
         // Authorization is opt-in: only apply policies if explicitly configured
@@ -51,6 +87,19 @@ public sealed class DynamicContractBuilder
             );
         }).ToList();
 
+        // The tenant discriminator is server-managed: never client-writable.
+        if (def.Tenant is not null)
+        {
+            for (var i = 0; i < fields.Count; i++)
+            {
+                if (string.Equals(fields[i].ApiName, def.Tenant.FieldApiName, StringComparison.OrdinalIgnoreCase) &&
+                    (fields[i].InCreate || fields[i].InUpdate || !fields[i].Immutable))
+                {
+                    fields[i] = fields[i] with { InCreate = false, InUpdate = false, Immutable = true };
+                }
+            }
+        }
+
         if (fields.All(f => !f.Name.Equals(def.KeyName, StringComparison.OrdinalIgnoreCase)))
         {
             fields.Add(new FieldContract(
@@ -72,6 +121,12 @@ public sealed class DynamicContractBuilder
                 Validation: new FieldValidationContract(false, null, null, null, null, null)
             ));
         }
+
+        // injected key may still collide with an existing field's apiName
+        foreach (var dup in fields.GroupBy(f => f.ApiName, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            errors.Add($"Entity '{def.EntityKey}': duplicate field apiName '{dup.Key}'.");
+        if (errors.Count > 0)
+            throw new ContractValidationException(errors);
 
         var relations = def.Relations.Select(r => new RelationContract(
             Name: r.Name,
@@ -95,15 +150,15 @@ public sealed class DynamicContractBuilder
         IReadOnlyList<string> createShape = fields.Where(f => f.InCreate).Select(f => f.ApiName).ToList();
         IReadOnlyList<string> updateShape = fields.Where(f => f.InUpdate).Select(f => f.ApiName).ToList();
 
-        var getOutput = readShape.Concat(expandAllowed).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var readOutput = readShape.Concat(expandAllowed).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
         IReadOnlyList<string> requiredOnCreate = fields.Where(f => f.Validation.RequiredOnCreate).Select(f => f.ApiName).ToList();
         IReadOnlyList<string> immutableFields = fields.Where(f => f.Immutable).Select(f => f.ApiName).ToList();
 
         var ops = new Dictionary<CrudOperation, OperationContract>
         {
-            [CrudOperation.List] = new(def.EnableList,  Array.Empty<string>(), readShape, Array.Empty<string>(), immutableFields, null),
-            [CrudOperation.Get]  = new(def.EnableGet,   Array.Empty<string>(), getOutput, Array.Empty<string>(), immutableFields, null),
+            [CrudOperation.List] = new(def.EnableList,  Array.Empty<string>(), readOutput, Array.Empty<string>(), immutableFields, null),
+            [CrudOperation.Get]  = new(def.EnableGet,   Array.Empty<string>(), readOutput, Array.Empty<string>(), immutableFields, null),
             [CrudOperation.Create]=new(def.EnableCreate,createShape, readShape, requiredOnCreate, immutableFields, null),
             [CrudOperation.Update]=new(def.EnableUpdate,updateShape, readShape, Array.Empty<string>(), immutableFields, concurrency),
             [CrudOperation.Delete]=new(def.EnableDelete,Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>(), immutableFields, null),

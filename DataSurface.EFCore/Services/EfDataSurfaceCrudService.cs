@@ -111,6 +111,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var c = _contracts.GetByResourceKey(resourceKey);
         EnsureEnabled(c, CrudOperation.List);
 
+        var hookCtx = NewHookCtx(c, CrudOperation.List);
+        var svcCtx = NewSvcCtx();
+
+        // Global hooks run before the cache check so a cache hit cannot silently skip them.
+        await _hooks.BeforeGlobalAsync(hookCtx);
+
         // Check cache only when no per-user security features are active (to avoid serving cached data across users)
         var useCache = _cache is not null && !HasPerUserSecurity(c);
         string? cacheKey = null;
@@ -121,6 +127,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             var cached = await _cache.GetListAsync(resourceKey, cacheKey, ct);
             if (cached is not null)
             {
+                await _hooks.AfterGlobalAsync(hookCtx);
+
+                // Cache hits are still reads: keep the audit trail complete.
+                if (_security is not null)
+                    await LogAuditAsync(_security.CreateAuditEntry(CrudOperation.List, resourceKey), ct);
+
                 sw.Stop();
                 DataSurfaceTracing.RecordSuccess(activity, cached.Items.Count);
                 _metrics?.RecordOperation(resourceKey, CrudOperation.List, sw.Elapsed.TotalMilliseconds, cached.Items.Count);
@@ -132,11 +144,6 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             // and the write-back prevents caching a now-stale result (stale-fill guard).
             observedListVersion = await _cache.GetListVersionAsync(resourceKey, ct);
         }
-
-        var hookCtx = NewHookCtx(c, CrudOperation.List);
-        var svcCtx = NewSvcCtx();
-
-        await _hooks.BeforeGlobalAsync(hookCtx);
 
         if (_features.EnableOverrides && _overrides.TryGet<ListOverride>(c.ResourceKey, CrudOperation.List, out var ov))
         {
@@ -150,9 +157,13 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         var (clrType, set) = ResolveSet(c);
 
+        // Resource-level authorization check (no instance for List)
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, null, clrType, CrudOperation.List, ct);
+
         // Apply row-level security filter
-        var filteredSet = _security is not null 
-            ? _security.ApplyResourceFilter(set, clrType, c) 
+        var filteredSet = _security is not null
+            ? _security.ApplyResourceFilter(set, clrType, c)
             : set;
 
         // Apply tenant isolation filter
@@ -171,7 +182,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         // optional: after-read hook per item (expensive; still useful)
         foreach (var e in pageItems)
-            await InvokeTypedAfterRead(e, hookCtx);
+            await InvokeTypedAfterRead(e, clrType, hookCtx);
 
         var json = pageItems.Select(e => EntityToJson(e, c, expand, spec.Fields)).ToList();
 
@@ -182,7 +193,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         // Audit logging for list operation
         if (_security is not null)
-            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.List, resourceKey), ct);
+            await LogAuditAsync(_security.CreateAuditEntry(CrudOperation.List, resourceKey), ct);
 
         sw.Stop();
         DataSurfaceTracing.RecordSuccess(activity, json.Count);
@@ -230,12 +241,25 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // (resource, id), so a cached non-expanded shape must not be served to an expand request.
         // Default expansions are constant per resource, so a request without expand is cacheable.
         var requestsExpand = expand is not null && expand.Expand.Count > 0;
+
+        var hookCtx = NewHookCtx(c, CrudOperation.Get);
+        var svcCtx = NewSvcCtx();
+
+        // Global hooks run before the cache check so a cache hit cannot silently skip them.
+        await _hooks.BeforeGlobalAsync(hookCtx);
+
         var useCache = _cache is not null && !HasPerUserSecurity(c) && !requestsExpand;
         if (useCache)
         {
             var cached = await _cache!.GetAsync(resourceKey, id, ct);
             if (cached is not null)
             {
+                await _hooks.AfterGlobalAsync(hookCtx);
+
+                // Cache hits are still reads: keep the audit trail complete.
+                if (_security is not null)
+                    await LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Get, resourceKey, id.ToString()), ct);
+
                 sw.Stop();
                 DataSurfaceTracing.RecordSuccess(activity);
                 _metrics?.RecordOperation(resourceKey, CrudOperation.Get, sw.Elapsed.TotalMilliseconds);
@@ -243,11 +267,6 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
                 return cached;
             }
         }
-
-        var hookCtx = NewHookCtx(c, CrudOperation.Get);
-        var svcCtx = NewSvcCtx();
-
-        await _hooks.BeforeGlobalAsync(hookCtx);
 
         if (_features.EnableOverrides && _overrides.TryGet<GetOverride>(c.ResourceKey, CrudOperation.Get, out var ov))
         {
@@ -306,7 +325,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_security is not null)
             await _security.AuthorizeResourceAsync(c, entity, clrType, CrudOperation.Get, ct);
 
-        await InvokeTypedAfterRead(entity, hookCtx);
+        await InvokeTypedAfterRead(entity, clrType, hookCtx);
 
         var json = EntityToJson(entity, c, expand);
 
@@ -317,7 +336,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
         // Audit logging
         if (_security is not null)
-            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Get, resourceKey, id.ToString()), ct);
+            await LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Get, resourceKey, id.ToString()), ct);
 
         sw.Stop();
         DataSurfaceTracing.RecordSuccess(activity);
@@ -377,14 +396,22 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_security is not null && c.Tenant is not null)
             _security.SetTenantValue(entity, c);
 
-        await InvokeTypedBeforeCreate(entity, body, hookCtx);
+        // Resource-level authorization check (the to-be-created instance, before persistence)
+        if (_security is not null)
+            await _security.AuthorizeResourceAsync(c, entity, clrType, CrudOperation.Create, ct);
+
+        await InvokeTypedBeforeCreate(entity, clrType, body, hookCtx);
 
         _db.Add(entity);
         await _db.SaveChangesAsync(ct);
 
-        await InvokeTypedAfterCreate(entity, hookCtx);
+        await InvokeTypedAfterCreate(entity, clrType, hookCtx);
 
         var json = EntityToJson(entity, c, expand: null);
+
+        // Apply field-level authorization (redact unauthorized fields) — the create response
+        // is a read of the entity and must not leak fields the caller cannot read.
+        _security?.RedactUnauthorizedFields(c, json);
 
         await _hooks.AfterGlobalAsync(hookCtx);
 
@@ -392,7 +419,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         if (_security is not null)
         {
             var keyVal = GetEntityKeyValue(entity, c);
-            await _security.LogAuditAsync(_security.CreateAuditEntry(
+            await LogAuditAsync(_security.CreateAuditEntry(
                 CrudOperation.Create, resourceKey, keyVal?.ToString(), changes: body), ct);
         }
 
@@ -452,13 +479,16 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         var (clrType, set) = ResolveSet(c);
 
         // Apply row-level security filter
-        var filteredSet = _security is not null 
-            ? _security.ApplyResourceFilter(set, clrType, c) 
+        var filteredSet = _security is not null
+            ? _security.ApplyResourceFilter(set, clrType, c)
             : set;
 
         // Apply tenant isolation filter
         if (_security is not null && c.Tenant is not null)
             filteredSet = _security.ApplyTenantFilter(filteredSet, clrType, c);
+
+        // Soft-deleted rows are invisible to reads, so they must not be updatable either.
+        filteredSet = ApplySoftDeleteFilter(filteredSet, clrType);
 
         var entity = await FindByIdAsync(filteredSet, clrType, c, id, ct) ?? throw new CrudNotFoundException(resourceKey, id);
 
@@ -469,20 +499,24 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         // Capture previous values for audit
         var previousValues = _security is not null ? EntityToJson(entity, c, expand: null) : null;
 
-        await InvokeTypedBeforeUpdate(entity, patch, hookCtx);
+        await InvokeTypedBeforeUpdate(entity, clrType, patch, hookCtx);
 
-        InvokeTypedApplyUpdate(entity, patch, c);
+        InvokeTypedApplyUpdate(entity, clrType, patch, c);
         await _db.SaveChangesAsync(ct);
 
-        await InvokeTypedAfterUpdate(entity, hookCtx);
+        await InvokeTypedAfterUpdate(entity, clrType, hookCtx);
 
         var json = EntityToJson(entity, c, expand: null);
+
+        // Apply field-level authorization (redact unauthorized fields) — the update response
+        // is a read of the entity and must not leak fields the caller cannot read.
+        _security?.RedactUnauthorizedFields(c, json);
 
         await _hooks.AfterGlobalAsync(hookCtx);
 
         // Audit logging
         if (_security is not null)
-            await _security.LogAuditAsync(_security.CreateAuditEntry(
+            await LogAuditAsync(_security.CreateAuditEntry(
                 CrudOperation.Update, resourceKey, id.ToString(), changes: patch, previousValues: previousValues), ct);
 
         sw.Stop();
@@ -577,7 +611,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             }
         }
 
-        await InvokeTypedBeforeDelete(entity, hookCtx);
+        await InvokeTypedBeforeDelete(entity, clrType, hookCtx);
 
         var hard = deleteSpec?.HardDelete ?? false;
 
@@ -586,12 +620,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
             sd.IsDeleted = true;
             await _db.SaveChangesAsync(ct);
 
-            await InvokeTypedAfterDelete(entity, hookCtx);
+            await InvokeTypedAfterDelete(entity, clrType, hookCtx);
             await _hooks.AfterGlobalAsync(hookCtx);
 
             // Audit logging
             if (_security is not null)
-                await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
+                await LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
 
             sw.Stop();
             DataSurfaceTracing.RecordSuccess(activity);
@@ -614,12 +648,12 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         _db.Remove(entity);
         await _db.SaveChangesAsync(ct);
 
-        await InvokeTypedAfterDelete(entity, hookCtx);
+        await InvokeTypedAfterDelete(entity, clrType, hookCtx);
         await _hooks.AfterGlobalAsync(hookCtx);
 
         // Audit logging
         if (_security is not null)
-            await _security.LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
+            await LogAuditAsync(_security.CreateAuditEntry(CrudOperation.Delete, resourceKey, id.ToString()), ct);
 
         sw.Stop();
         DataSurfaceTracing.RecordSuccess(activity);
@@ -643,7 +677,7 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
     private static void EnsureEnabled(ResourceContract c, CrudOperation op)
     {
         if (!c.Operations.TryGetValue(op, out var oc) || !oc.Enabled)
-            throw new InvalidOperationException($"Operation '{op}' is disabled for resource '{c.ResourceKey}'.");
+            throw new CrudOperationDisabledException(c.ResourceKey, op.ToString());
     }
 
     private static object? GetEntityKeyValue(object entity, ResourceContract c)
@@ -652,61 +686,64 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         return prop?.GetValue(entity);
     }
     
-    private Task InvokeTypedAfterRead(object entity, CrudHookContext ctx)
+    // All typed-hook invokers close the generic over the CONTRACT's CLR type, not
+    // entity.GetType(): with EF lazy-loading/change-tracking proxies the runtime type is a
+    // proxy subclass, and resolving ICrudHook<ProxyType> from DI would silently match nothing.
+    private Task InvokeTypedAfterRead(object entity, Type clrType, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.AfterReadAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, ctx })!;
     }
 
-    private Task InvokeTypedBeforeCreate(object entity, JsonObject body, CrudHookContext ctx)
+    private Task InvokeTypedBeforeCreate(object entity, Type clrType, JsonObject body, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.BeforeCreateAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, body, ctx })!;
     }
 
-    private Task InvokeTypedAfterCreate(object entity, CrudHookContext ctx)
+    private Task InvokeTypedAfterCreate(object entity, Type clrType, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.AfterCreateAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, ctx })!;
     }
 
-    private Task InvokeTypedBeforeUpdate(object entity, JsonObject patch, CrudHookContext ctx)
+    private Task InvokeTypedBeforeUpdate(object entity, Type clrType, JsonObject patch, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.BeforeUpdateAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, patch, ctx })!;
     }
 
-    private Task InvokeTypedAfterUpdate(object entity, CrudHookContext ctx)
+    private Task InvokeTypedAfterUpdate(object entity, Type clrType, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.AfterUpdateAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, ctx })!;
     }
 
-    private void InvokeTypedApplyUpdate(object entity, JsonObject patch, ResourceContract c)
+    private void InvokeTypedApplyUpdate(object entity, Type clrType, JsonObject patch, ResourceContract c)
     {
         var m = typeof(EfCrudMapper).GetMethod(nameof(EfCrudMapper.ApplyUpdate))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         // DoNotWrapExceptions: let domain exceptions (validation/concurrency) propagate
         // unwrapped instead of being hidden inside TargetInvocationException.
         m.Invoke(_mapper, System.Reflection.BindingFlags.DoNotWrapExceptions, null, new object[] { entity, patch, c, _db }, null);
     }
 
-    private Task InvokeTypedBeforeDelete(object entity, CrudHookContext ctx)
+    private Task InvokeTypedBeforeDelete(object entity, Type clrType, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.BeforeDeleteAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, ctx })!;
     }
 
-    private Task InvokeTypedAfterDelete(object entity, CrudHookContext ctx)
+    private Task InvokeTypedAfterDelete(object entity, Type clrType, CrudHookContext ctx)
     {
         var m = typeof(CrudHookDispatcher).GetMethod(nameof(CrudHookDispatcher.AfterDeleteAsync))!
-            .MakeGenericMethod(entity.GetType());
+            .MakeGenericMethod(clrType);
         return (Task)m.Invoke(_hooks, new object[] { entity, ctx })!;
     }
 
@@ -769,10 +806,16 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
 
     private Type ResolveClrType(ResourceContract c)
         => _typeCache.GetOrAdd(c.ResourceKey, key =>
-            AppDomain.CurrentDomain.GetAssemblies()
+            // Prefer the DbContext model: it is the authoritative set of entity types this
+            // service can operate on, and avoids binding to an unrelated same-named type
+            // from an arbitrary loaded assembly.
+            _db.Model.GetEntityTypes()
+                .Select(et => et.ClrType)
+                .FirstOrDefault(t => t.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
+            ?? AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(a => SafeGetTypes(a))
                 .FirstOrDefault(t => t.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Cannot resolve CLR type for resourceKey '{key}'."));
+            ?? throw new InvalidOperationException($"Cannot resolve CLR type for resourceKey '{key}'."));
 
     private Type? TryResolveClrType(ResourceContract c)
     {
@@ -1168,7 +1211,101 @@ public sealed class EfDataSurfaceCrudService : IDataSurfaceCrudService
         }
     }
 
+    // ----- deferred events (bulk transactions) -----
+
+    // When a caller (the bulk service) wraps multiple operations in a transaction, webhooks and
+    // audit entries must not be emitted per item: a later rollback would leave external consumers
+    // with events for data that never persisted. The scope buffers them; FlushAsync emits after
+    // commit, Dispose without flush discards.
+    private DeferredEvents? _deferredEvents;
+
+    private sealed class DeferredEvents
+    {
+        public List<(string ResourceKey, CrudOperation Op, string? Id, JsonObject? Payload)> Webhooks { get; } = new();
+        public List<AuditLogEntry> Audits { get; } = new();
+    }
+
+    /// <summary>
+    /// Begins buffering webhook events and audit entries instead of emitting them immediately.
+    /// Call <see cref="DeferredEventsScope.FlushAsync"/> after a successful commit; disposing the
+    /// scope without flushing discards the buffered events (rollback semantics).
+    /// </summary>
+    public DeferredEventsScope BeginDeferredEvents()
+    {
+        _deferredEvents = new DeferredEvents();
+        return new DeferredEventsScope(this);
+    }
+
+    /// <summary>
+    /// Scope controlling deferred webhook/audit emission. See <see cref="BeginDeferredEvents"/>.
+    /// </summary>
+    public sealed class DeferredEventsScope : IDisposable
+    {
+        private readonly EfDataSurfaceCrudService _svc;
+        private bool _done;
+
+        internal DeferredEventsScope(EfDataSurfaceCrudService svc) => _svc = svc;
+
+        /// <summary>Emits all buffered events. Call only after the enclosing transaction committed.</summary>
+        public async Task FlushAsync(CancellationToken ct = default)
+        {
+            if (_done) return;
+            _done = true;
+
+            var buffered = _svc._deferredEvents;
+            _svc._deferredEvents = null;
+            if (buffered is null) return;
+
+            if (_svc._security is not null)
+            {
+                foreach (var entry in buffered.Audits)
+                    await _svc._security.LogAuditAsync(entry, ct);
+            }
+
+            foreach (var (resourceKey, op, id, payload) in buffered.Webhooks)
+                await _svc.PublishWebhookCoreAsync(resourceKey, op, id, payload, ct);
+        }
+
+        /// <summary>Discards buffered events when not flushed (i.e. the transaction rolled back).</summary>
+        public void Dispose()
+        {
+            if (_done) return;
+            _done = true;
+            _svc._deferredEvents = null;
+        }
+    }
+
+    private async Task LogAuditAsync(AuditLogEntry entry, CancellationToken ct)
+    {
+        if (_deferredEvents is not null)
+        {
+            _deferredEvents.Audits.Add(entry);
+            return;
+        }
+
+        if (_security is not null)
+            await _security.LogAuditAsync(entry, ct);
+    }
+
     private async Task PublishWebhookAsync(
+        string resourceKey,
+        CrudOperation operation,
+        string? entityId,
+        JsonObject? payload,
+        CancellationToken ct)
+    {
+        if (_webhooks is null) return;
+
+        if (_deferredEvents is not null)
+        {
+            _deferredEvents.Webhooks.Add((resourceKey, operation, entityId, payload));
+            return;
+        }
+
+        await PublishWebhookCoreAsync(resourceKey, operation, entityId, payload, ct);
+    }
+
+    private async Task PublishWebhookCoreAsync(
         string resourceKey,
         CrudOperation operation,
         string? entityId,

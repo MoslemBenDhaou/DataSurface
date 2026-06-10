@@ -30,6 +30,14 @@ public interface IDynamicEntityDefStore
     /// <returns>A list of entity definitions.</returns>
     Task<IReadOnlyList<EntityDef>> GetAllAsync(CancellationToken ct);
 
+    /// <summary>
+    /// Gets all entity definitions together with their row <c>UpdatedAt</c> timestamps, used to
+    /// stamp cached contracts for freshness checks.
+    /// </summary>
+    /// <param name="ct">A cancellation token.</param>
+    /// <returns>A list of (definition, updatedAt) pairs.</returns>
+    Task<IReadOnlyList<(EntityDef Def, DateTime UpdatedAt)>> GetAllWithTimestampsAsync(CancellationToken ct);
+
     // Used for cache invalidation checks
     /// <summary>
     /// Gets the last updated timestamp for the specified entity definition.

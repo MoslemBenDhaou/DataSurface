@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using DataSurface.Core;
 using DataSurface.Core.Enums;
 using DataSurface.EFCore.Contracts;
 using DataSurface.EFCore.Interfaces;
@@ -17,6 +18,7 @@ public sealed class EfDataSurfaceStreamingService : IDataSurfaceStreamingService
     private readonly IResourceContractProvider _contracts;
     private readonly ILogger<EfDataSurfaceStreamingService> _logger;
     private readonly DataSurfaceMetrics? _metrics;
+    private readonly DataSurfaceFeatures _features;
 
     /// <summary>
     /// Creates a new streaming service instance.
@@ -25,12 +27,14 @@ public sealed class EfDataSurfaceStreamingService : IDataSurfaceStreamingService
         IDataSurfaceCrudService crud,
         IResourceContractProvider contracts,
         ILogger<EfDataSurfaceStreamingService> logger,
-        DataSurfaceMetrics? metrics = null)
+        DataSurfaceMetrics? metrics = null,
+        DataSurfaceFeatures? features = null)
     {
         _crud = crud;
         _contracts = contracts;
         _logger = logger;
-        _metrics = metrics;
+        _features = features ?? new DataSurfaceFeatures();
+        _metrics = _features.EnableMetrics ? metrics : null;
     }
 
     /// <inheritdoc />
@@ -41,7 +45,7 @@ public sealed class EfDataSurfaceStreamingService : IDataSurfaceStreamingService
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List) : null;
         activity?.SetTag("datasurface.streaming", true);
 
         _logger.LogDebug("Starting stream for {Resource}", resourceKey);
@@ -85,7 +89,7 @@ public sealed class EfDataSurfaceStreamingService : IDataSurfaceStreamingService
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        using var activity = DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List);
+        using var activity = _features.EnableTracing ? DataSurfaceTracing.StartOperation(resourceKey, CrudOperation.List) : null;
         activity?.SetTag("datasurface.streaming", true);
         activity?.SetTag("datasurface.batch_size", batchSize);
 

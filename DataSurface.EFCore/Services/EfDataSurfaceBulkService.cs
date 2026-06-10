@@ -62,6 +62,13 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
         if (spec.UseTransaction)
             transaction = await _db.Database.BeginTransactionAsync(ct);
 
+        // Inside a transaction, webhooks and audit entries must not fire per item: a rollback
+        // would leave external consumers with events for rows that never persisted. Buffer them
+        // and flush only after a successful commit.
+        var deferredEvents = transaction is not null && _crud is EfDataSurfaceCrudService efCrud
+            ? efCrud.BeginDeferredEvents()
+            : null;
+
         try
         {
             // Process creates
@@ -74,6 +81,10 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                 }
                 catch (Exception ex)
                 {
+                    // A failed SaveChanges leaves the failed entity tracked (Added/Modified);
+                    // without clearing, every subsequent item re-attempts it and fails too.
+                    _db.ChangeTracker.Clear();
+
                     errors.Add(new BulkOperationError
                     {
                         Operation = "Create",
@@ -99,6 +110,8 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                     }
                     catch (Exception ex)
                     {
+                        _db.ChangeTracker.Clear();
+
                         errors.Add(new BulkOperationError
                         {
                             Operation = "Update",
@@ -126,6 +139,8 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
                     }
                     catch (Exception ex)
                     {
+                        _db.ChangeTracker.Clear();
+
                         errors.Add(new BulkOperationError
                         {
                             Operation = "Delete",
@@ -143,9 +158,16 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
             if (transaction is not null)
             {
                 if (errors.Count == 0)
+                {
                     await transaction.CommitAsync(ct);
+
+                    if (deferredEvents is not null)
+                        await deferredEvents.FlushAsync(ct);
+                }
                 else
+                {
                     await transaction.RollbackAsync(ct);
+                }
             }
         }
         catch (Exception ex)
@@ -166,6 +188,9 @@ public sealed class EfDataSurfaceBulkService : IDataSurfaceBulkService
         }
         finally
         {
+            // Disposing an unflushed scope discards the buffered events (rollback semantics).
+            deferredEvents?.Dispose();
+
             if (transaction is not null)
                 await transaction.DisposeAsync();
         }

@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Text.Json;
+using System.Globalization;
 using System.Text.Json.Nodes;
 using DataSurface.Core;
 using DataSurface.Core.Contracts;
@@ -23,6 +23,11 @@ namespace DataSurface.Dynamic.Services;
 /// </summary>
 public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 {
+    private static readonly HashSet<string> KnownOps = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "eq", "neq", "gt", "gte", "lt", "lte", "contains", "starts", "ends", "in", "isnull"
+    };
+
     private readonly DbContext _db;
     private readonly DynamicResourceContractProvider _contracts;
     private readonly IDynamicIndexService _index;
@@ -36,11 +41,6 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     private readonly IResourceContractProvider _compositeContracts; // for expand targets
     private readonly CrudSecurityDispatcher? _security;
     private readonly DataSurfaceFeatures _features;
-
-    private readonly JsonSerializerOptions _jsonOpt = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
 
     /// <summary>
     /// Creates a new dynamic CRUD service.
@@ -142,6 +142,22 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         foreach (var row in rows)
         {
             var obj = ProjectRowToJson(row, c, projectedFields);
+
+            // Resource-level authorization runs per item (same as Get); denied items are
+            // excluded from the page instead of failing the whole list, mirroring how
+            // LoadExpandTargetsAsync skips unauthorized expanded items.
+            if (_security is not null)
+            {
+                try
+                {
+                    await _security.AuthorizeResourceAsync(c, obj, typeof(JsonObject), CrudOperation.List, ct);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    continue;
+                }
+            }
+
             if (expand is not null) await ApplyExpandAsync(obj, row, c, expand, ct);
             // JSON read hook
             await _resourceHooks.AfterReadAsync(c.ResourceKey, row.Id, obj, hookCtx);
@@ -191,7 +207,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             return result;
         }
 
-        var idStr = NormalizeIdString(id);
+        var idStr = NormalizeIdString(c, id);
         var getQuery = _db.Set<DsDynamicRecordRow>()
             .AsNoTracking()
             .Where(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted);
@@ -268,9 +284,20 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         var keyApi = GetKeyApiName(c);
         var recordId = ResolveOrGenerateId(c, body);
 
+        // Reject id collisions explicitly (400) instead of surfacing a raw DbUpdateException
+        // (500). Soft-deleted rows are included: the (EntityKey, Id) primary key still exists.
+        var duplicate = await _db.Set<DsDynamicRecordRow>()
+            .AsNoTracking()
+            .AnyAsync(r => r.EntityKey == c.ResourceKey && r.Id == recordId, ct);
+        if (duplicate)
+            throw new CrudRequestValidationException(new Dictionary<string, string[]>
+            {
+                [keyApi] = new[] { $"A record with id '{recordId}' already exists for resource '{c.ResourceKey}'." }
+            });
+
         // Build stored JSON (only allowed Create fields)
         var stored = BuildStoredJson(c, CrudOperation.Create, body);
-        stored[keyApi] = recordId;
+        stored[keyApi] = CreateKeyNode(c, keyApi, recordId);
 
         // Tenant isolation: resolve the current tenant and stamp it on the record (server-set,
         // overriding any client value) so records are filtered by tenant at the storage layer.
@@ -290,12 +317,13 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         };
 
         _db.Add(row);
+
+        // Stage index rows on the same change tracker so record + index rows are persisted
+        // atomically by a single SaveChanges.
+        await _index.StageIndexRowsAsync(c.ResourceKey, row.Id, c, stored, ct);
         await _db.SaveChangesAsync(ct);
 
-        // rebuild indexes
-        await _index.RebuildIndexesAsync(c.ResourceKey, row.Id, c, stored, ct);
-
-        var created = ProjectJsonToReadShape(c, stored);
+        var created = ProjectRowToJson(row, c);
         await _resourceHooks.AfterCreateAsync(c.ResourceKey, created, hookCtx);
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -341,7 +369,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             return result;
         }
 
-        var idStr = NormalizeIdString(id);
+        var idStr = NormalizeIdString(c, id);
 
         // Load tracked entity for concurrency
         var updQuery = _db.Set<DsDynamicRecordRow>()
@@ -361,7 +389,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _resourceHooks.BeforeUpdateAsync(c.ResourceKey, id, patch, hookCtx);
 
-        // Concurrency (RowVersion)
+        // Concurrency (RowVersion): set the EF original value so the conflict is enforced by
+        // the database at SaveChanges (DbUpdateConcurrencyException -> 409).
         ApplyConcurrencyTokenIfAny(c, patch, row);
 
         var current = JsonNode.Parse(row.DataJson)?.AsObject() ?? new JsonObject();
@@ -369,16 +398,16 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         // Apply patch only for allowed fields
         var stored = BuildStoredJson(c, CrudOperation.Update, patch, current);
-        stored[keyApi] = row.Id; // keep key stable
+        stored[keyApi] = CreateKeyNode(c, keyApi, row.Id); // keep key stable
 
         row.DataJson = stored.ToJsonString();
         row.UpdatedAt = DateTime.UtcNow;
 
+        // Stage index rows on the same change tracker: record + index rows persist atomically.
+        await _index.StageIndexRowsAsync(c.ResourceKey, row.Id, c, stored, ct);
         await _db.SaveChangesAsync(ct);
 
-        await _index.RebuildIndexesAsync(c.ResourceKey, row.Id, c, stored, ct);
-
-        var updated = ProjectJsonToReadShape(c, stored);
+        var updated = ProjectRowToJson(row, c);
         await _resourceHooks.AfterUpdateAsync(c.ResourceKey, id, updated, hookCtx);
 
         await _globalHooks.AfterGlobalAsync(hookCtx);
@@ -418,9 +447,14 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             return;
         }
 
-        var idStr = NormalizeIdString(id);
+        var hard = deleteSpec?.HardDelete ?? false;
+
+        var idStr = NormalizeIdString(c, id);
         var delQuery = _db.Set<DsDynamicRecordRow>()
-            .Where(r => r.EntityKey == c.ResourceKey && r.Id == idStr && !r.IsDeleted);
+            .Where(r => r.EntityKey == c.ResourceKey && r.Id == idStr);
+        // Hard delete may target soft-deleted rows too, so a soft-deleted id can be purged.
+        if (!hard)
+            delQuery = delQuery.Where(r => !r.IsDeleted);
         if (_features.EnableTenantIsolation && c.Tenant is not null)
         {
             var tenantValue = ResolveTenantValue(c);
@@ -436,15 +470,24 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
         await _resourceHooks.BeforeDeleteAsync(c.ResourceKey, id, hookCtx);
 
-        var hard = deleteSpec?.HardDelete ?? false;
+        // Honor the optimistic-concurrency token with the same semantics as Update.
+        if (deleteSpec?.ConcurrencyToken is { } token)
+        {
+            var cc = c.Operations.TryGetValue(CrudOperation.Update, out var updOc) ? updOc.Concurrency : null;
+            if (cc is not null && cc.Mode == ConcurrencyMode.RowVersion)
+                EnforceRowVersion(cc, token, row);
+        }
 
         if (!hard)
         {
             row.IsDeleted = true;
             row.UpdatedAt = DateTime.UtcNow;
+
+            // Remove the index rows in the same SaveChanges so a soft-deleted record can no
+            // longer be matched by filters/sorts.
+            await _index.StageIndexRowsAsync(c.ResourceKey, row.Id, c, null, ct);
             await _db.SaveChangesAsync(ct);
 
-            // indexes can remain (filtered out by IsDeleted) OR be deleted.
             await _resourceHooks.AfterDeleteAsync(c.ResourceKey, id, hookCtx);
             await _globalHooks.AfterGlobalAsync(hookCtx);
 
@@ -455,9 +498,8 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             return;
         }
 
-        // hard delete: remove record and indexes
-        var oldIdx = _db.Set<DsDynamicIndexRow>().Where(x => x.EntityKey == c.ResourceKey && x.RecordId == row.Id);
-        _db.RemoveRange(oldIdx);
+        // hard delete: remove record and indexes in one SaveChanges
+        await _index.StageIndexRowsAsync(c.ResourceKey, row.Id, c, null, ct);
         _db.Remove(row);
         await _db.SaveChangesAsync(ct);
 
@@ -482,7 +524,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     private static void EnsureEnabled(ResourceContract c, CrudOperation op)
     {
         if (!c.Operations.TryGetValue(op, out var oc) || !oc.Enabled)
-            throw new InvalidOperationException($"Operation '{op}' is disabled for resource '{c.ResourceKey}'.");
+            throw new CrudOperationDisabledException(c.ResourceKey, op.ToString());
     }
 
     // Resolves the current tenant value for a tenant-scoped resource, reusing the EF security
@@ -500,8 +542,20 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         return value;
     }
 
-    private static string NormalizeIdString(object id)
-        => id is string s ? s : Convert.ToString(id, System.Globalization.CultureInfo.InvariantCulture) ?? id.ToString()!;
+    // Canonicalizes a route/client id to the single storage format. Guid ids always use the
+    // "D" (hyphenated) format, regardless of how the client supplied them ("N", braces, ...),
+    // so generated and parsed ids compare equal.
+    private static string NormalizeIdString(ResourceContract c, object id)
+    {
+        if (id is Guid g) return g.ToString("D");
+
+        var s = id as string ?? Convert.ToString(id, CultureInfo.InvariantCulture) ?? id.ToString()!;
+
+        if (c.Key.Type == FieldType.Guid && Guid.TryParse(s, out var parsed))
+            return parsed.ToString("D");
+
+        return s;
+    }
 
     private static string GetKeyApiName(ResourceContract c)
     {
@@ -509,16 +563,66 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         return keyField?.ApiName ?? c.Key.Name;
     }
 
+    // Extracts the raw string value from a JSON node without retaining JSON escaping
+    // (ToJsonString().Trim('"') keeps escapes: "Café" would round-trip as "Café").
+    private static string ExtractString(JsonNode node)
+    {
+        if (node is JsonValue v)
+        {
+            if (v.TryGetValue<string>(out var s)) return s;
+            if (v.TryGetValue<Guid>(out var g)) return g.ToString("D");
+            if (v.TryGetValue<long>(out var l)) return l.ToString(CultureInfo.InvariantCulture);
+            if (v.TryGetValue<decimal>(out var d)) return d.ToString(CultureInfo.InvariantCulture);
+            if (v.TryGetValue<bool>(out var b)) return b ? "true" : "false";
+        }
+        return node.ToJsonString().Trim('"');
+    }
+
+    // Case-insensitive property lookup against a client-supplied JSON object.
+    private static JsonNode? GetPropertyCI(JsonObject obj, string name)
+    {
+        if (obj.TryGetPropertyValue(name, out var v)) return v;
+        foreach (var kv in obj)
+            if (string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase))
+                return kv.Value;
+        return null;
+    }
+
+    // Writes the key as a typed JSON value matching the contract key type so typed keys
+    // round-trip (Int32/Int64 -> number, Guid/String -> string).
+    private static JsonNode CreateKeyNode(ResourceContract c, string keyApi, string idStr)
+    {
+        switch (c.Key.Type)
+        {
+            case FieldType.Int32:
+                if (int.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i))
+                    return JsonValue.Create(i);
+                break;
+            case FieldType.Int64:
+                if (long.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var l))
+                    return JsonValue.Create(l);
+                break;
+            default:
+                return JsonValue.Create(idStr)!;
+        }
+
+        throw new CrudRequestValidationException(new Dictionary<string, string[]>
+        {
+            [keyApi] = new[] { $"'{idStr}' is not a valid {c.Key.Type} key value." }
+        });
+    }
+
     private string ResolveOrGenerateId(ResourceContract c, JsonObject body)
     {
         var keyApi = GetKeyApiName(c);
 
-        if (body.TryGetPropertyValue(keyApi, out var n) && n is not null)
-            return n.ToJsonString().Trim('"');
+        var supplied = GetPropertyCI(body, keyApi);
+        if (supplied is not null)
+            return NormalizeIdString(c, ExtractString(supplied));
 
         // If not supplied, only auto-generate for Guid keys
         if (c.Key.Type == FieldType.Guid)
-            return Guid.NewGuid().ToString("N");
+            return Guid.NewGuid().ToString("D");
 
         throw new CrudRequestValidationException(new Dictionary<string, string[]>
         {
@@ -529,6 +633,12 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     private JsonObject ProjectRowToJson(DsDynamicRecordRow row, ResourceContract contract, string? projectedFields = null)
     {
         var obj = JsonNode.Parse(row.DataJson)?.AsObject() ?? new JsonObject();
+
+        // Surface the row-version concurrency token (base64) so clients/ETags can obtain it.
+        var cc = contract.Operations.TryGetValue(CrudOperation.Update, out var updOc) ? updOc.Concurrency : null;
+        if (cc is not null && cc.Mode == ConcurrencyMode.RowVersion && row.RowVersion is not null)
+            obj[cc.FieldApiName] = Convert.ToBase64String(row.RowVersion);
+
         return ProjectJsonToReadShape(contract, obj, projectedFields);
     }
 
@@ -560,23 +670,32 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
     {
         // Stored representation is merged (PATCH-like) for Update.
         var stored = existing?.DeepClone().AsObject() ?? new JsonObject();
-        var allowed = new HashSet<string>(c.Operations[op].InputShape, StringComparer.OrdinalIgnoreCase);
+
+        // Validation is case-insensitive but storage must use the CANONICAL contract apiName:
+        // map each client key to the contract's casing so reads/indexing find the values.
+        var canonical = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in c.Operations[op].InputShape)
+            canonical[name] = name;
+        foreach (var f in c.Fields)
+            if (canonical.ContainsKey(f.ApiName))
+                canonical[f.ApiName] = f.ApiName;
 
         foreach (var kv in input)
         {
-            if (!allowed.Contains(kv.Key)) continue;
-            stored[kv.Key] = kv.Value?.DeepClone();
+            if (!canonical.TryGetValue(kv.Key, out var canonicalName)) continue;
+            stored[canonicalName] = kv.Value?.DeepClone();
         }
 
         return stored;
     }
 
-    private static void ApplyConcurrencyTokenIfAny(ResourceContract c, JsonObject patch, DsDynamicRecordRow row)
+    private void ApplyConcurrencyTokenIfAny(ResourceContract c, JsonObject patch, DsDynamicRecordRow row)
     {
         var cc = c.Operations[CrudOperation.Update].Concurrency;
         if (cc is null || cc.Mode == ConcurrencyMode.None) return;
 
-        if (!patch.TryGetPropertyValue(cc.FieldApiName, out var tokenNode) || tokenNode is null)
+        var tokenNode = GetPropertyCI(patch, cc.FieldApiName);
+        if (tokenNode is null)
         {
             if (cc.RequiredOnUpdate)
                 throw new CrudRequestValidationException(new Dictionary<string, string[]>
@@ -587,18 +706,31 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
         }
 
         if (cc.Mode == ConcurrencyMode.RowVersion)
-        {
-            var tokenStr = tokenNode.ToJsonString().Trim('"');
-            var bytes = Convert.FromBase64String(tokenStr);
+            EnforceRowVersion(cc, ExtractString(tokenNode), row);
+    }
 
-            // EF concurrency: set original value
-            var entry = row; // tracked
-            // Use EF Entry API via DbContext in caller if needed; simplified:
-            // We can also set OriginalValue by attaching: done best in caller.
-            // Here, we validate equality to avoid silent overwrite:
-            if (!row.RowVersion.SequenceEqual(bytes))
-                throw new DbUpdateConcurrencyException("Concurrency conflict (rowversion mismatch).");
+    // Sets the EF original value for the row version so the concurrency conflict is enforced
+    // by the provider at SaveChanges (DbUpdateConcurrencyException -> 409) instead of a racy
+    // read-then-compare. Providers without generated row versions (e.g. InMemory) leave
+    // RowVersion null; enforcement is skipped in that case.
+    private void EnforceRowVersion(ConcurrencyContract cc, string tokenStr, DsDynamicRecordRow row)
+    {
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(tokenStr);
         }
+        catch (FormatException)
+        {
+            throw new CrudRequestValidationException(new Dictionary<string, string[]>
+            {
+                [cc.FieldApiName] = new[] { "Concurrency token is not a valid base64 value." }
+            });
+        }
+
+        if (row.RowVersion is null) return; // provider without rowversion support
+
+        _db.Entry(row).Property(r => r.RowVersion).OriginalValue = bytes;
     }
 
     private IQueryable<DsDynamicRecordRow> ApplyFilters(IQueryable<DsDynamicRecordRow> baseQuery, ResourceContract c, QuerySpec spec)
@@ -659,7 +791,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             {
                 ["filter"] = new[] { $"Invalid numeric filter value '{val}'." }
             });
-        
+
         return op switch
         {
             "eq" => q.Where(x => x.ValueNumber == n),
@@ -674,12 +806,17 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
     private static IQueryable<DsDynamicIndexRow> FilterDate(IQueryable<DsDynamicIndexRow> q, string op, string val)
     {
-        if (!DateTime.TryParse(val, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var d))
+        // Parse via DateTimeOffset and normalize to UTC so comparisons match the UTC values
+        // the index service stores, regardless of server timezone.
+        if (!DateTimeOffset.TryParse(val, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var dto))
             throw new CrudRequestValidationException(new Dictionary<string, string[]>
             {
                 ["filter"] = new[] { $"Invalid date filter value '{val}'." }
             });
-        
+
+        var d = dto.UtcDateTime;
+
         return op switch
         {
             "eq" => q.Where(x => x.ValueDateTime == d),
@@ -698,7 +835,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             {
                 ["filter"] = new[] { $"Invalid boolean filter value '{val}'." }
             });
-        
+
         return op switch
         {
             "eq" => q.Where(x => x.ValueBool == b),
@@ -714,7 +851,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             {
                 ["filter"] = new[] { $"Invalid GUID filter value '{val}'." }
             });
-        
+
         return op switch
         {
             "eq" => q.Where(x => x.ValueGuid == g),
@@ -814,11 +951,18 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             : ((IOrderedQueryable<DsDynamicRecordRow>)query).ThenBy(keySelector);
     }
 
+    // Only a known operator prefix is treated as an operator; anything else is an equality
+    // value. Without the whitelist, plain values containing ':' (ISO timestamps, URNs,
+    // "ns:key" strings) would be torn apart at the first colon.
     private static (string op, string value) ParseOp(string raw)
     {
         var idx = raw.IndexOf(':');
         if (idx <= 0) return ("eq", raw.Trim());
-        return (raw[..idx].Trim().ToLowerInvariant(), raw[(idx + 1)..].Trim());
+
+        var prefix = raw[..idx].Trim();
+        if (!KnownOps.Contains(prefix)) return ("eq", raw.Trim());
+
+        return (prefix.ToLowerInvariant(), raw[(idx + 1)..].Trim());
     }
 
     private async Task ApplyExpandAsync(JsonObject projected, DsDynamicRecordRow row, ResourceContract contract, ExpandSpec expand, CancellationToken ct)
@@ -853,7 +997,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
             if (rel.Write.Mode == RelationWriteMode.ById)
             {
-                var targetId = node.ToJsonString().Trim('"');
+                var targetId = ExtractString(node);
                 var targets = await LoadExpandTargetsAsync(targetContract, new[] { targetId }, ct);
                 projected[relApi] = targets.TryGetValue(targetId, out var t) ? t.DeepClone() : null;
             }
@@ -867,7 +1011,7 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
                 // Batch-load all related ids in one query instead of one Get per id (fixes N+1),
                 // preserving tenant isolation + resource auth + field redaction on the targets.
-                var ids = arr.Where(x => x is not null).Select(x => x!.ToJsonString().Trim('"')).ToList();
+                var ids = arr.Where(x => x is not null).Select(x => ExtractString(x!)).ToList();
                 var targets = await LoadExpandTargetsAsync(targetContract, ids, ct);
 
                 var outArr = new JsonArray();
@@ -881,8 +1025,9 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
 
     // Batch-loads dynamic expand targets by id in a single query, projecting each to its read shape
     // and applying the SAME security as a direct Get: tenant isolation (in the query predicate),
-    // resource-level authorization, and field redaction. (The per-item AfterRead hook / audit / Get
-    // overrides are intentionally not run for included/expanded items.)
+    // resource-level authorization (denied targets are excluded), and field redaction. (The
+    // per-item AfterRead hook / audit / Get overrides are intentionally not run for
+    // included/expanded items.)
     private async Task<Dictionary<string, JsonObject>> LoadExpandTargetsAsync(
         ResourceContract targetContract, IReadOnlyCollection<string> ids, CancellationToken ct)
     {
@@ -906,7 +1051,16 @@ public sealed class DynamicDataSurfaceCrudService : IDataSurfaceCrudService
             var o = ProjectRowToJson(r, targetContract);
 
             if (_security is not null)
-                await _security.AuthorizeResourceAsync(targetContract, o, typeof(JsonObject), CrudOperation.Get, ct);
+            {
+                try
+                {
+                    await _security.AuthorizeResourceAsync(targetContract, o, typeof(JsonObject), CrudOperation.Get, ct);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    continue; // exclude denied expand targets instead of failing the parent read
+                }
+            }
             _security?.RedactUnauthorizedFields(targetContract, o);
 
             map[r.Id] = o;

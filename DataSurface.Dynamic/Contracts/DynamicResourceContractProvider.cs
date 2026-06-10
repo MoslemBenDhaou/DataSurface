@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Dynamic.Stores;
@@ -15,18 +14,22 @@ public sealed class DynamicResourceContractProvider : IResourceContractProvider
     private readonly IDynamicEntityDefStore _store;
     private readonly DynamicContractBuilder _builder;
 
-    private readonly ConcurrentDictionary<string, (ResourceContract Contract, DateTime UpdatedAt)> _cache =
-        new(StringComparer.OrdinalIgnoreCase);
+    // Shared (singleton) cache: the provider itself is scoped, so a per-instance cache would
+    // always be empty for fresh scopes and `All` would never surface dynamic resources in
+    // discovery/schema.
+    private readonly DynamicContractCache _cache;
 
     /// <summary>
     /// Creates a new dynamic contract provider.
     /// </summary>
     /// <param name="store">Store used to load dynamic entity definitions.</param>
     /// <param name="builder">Builder used to convert definitions into normalized contracts.</param>
-    public DynamicResourceContractProvider(IDynamicEntityDefStore store, DynamicContractBuilder builder)
+    /// <param name="cache">Shared application-wide contract cache.</param>
+    public DynamicResourceContractProvider(IDynamicEntityDefStore store, DynamicContractBuilder builder, DynamicContractCache cache)
     {
         _store = store;
         _builder = builder;
+        _cache = cache;
     }
 
     /// <inheritdoc />
@@ -34,25 +37,27 @@ public sealed class DynamicResourceContractProvider : IResourceContractProvider
     {
         get
         {
-            // Important: this is a sync property. We keep it simple:
-            // - load everything once at startup (recommended) OR
-            // - let the app call WarmUpAsync() at startup.
-            // For correctness here, we return cached contracts only.
-            return _cache.Values.Select(x => x.Contract).ToList();
+            // Sync property backed by the shared cache. The cache is populated at startup by
+            // the warm-up hosted service (DataSurfaceDynamicOptions.WarmUpContractsOnStart)
+            // and incrementally by every per-key resolution.
+            return _cache.Entries.Values.Select(x => x.Contract).ToList();
         }
     }
 
     /// <summary>
-    /// Loads all entity definitions from the store and builds contracts into the in-memory cache.
+    /// Loads all entity definitions from the store and builds contracts into the shared cache.
     /// </summary>
     /// <param name="ct">A cancellation token.</param>
     public async Task WarmUpAsync(CancellationToken ct)
     {
-        var defs = await _store.GetAllAsync(ct);
-        foreach (var d in defs)
+        var defs = await _store.GetAllWithTimestampsAsync(ct);
+        foreach (var (def, updatedAt) in defs)
         {
-            var rc = _builder.Build(d);
-            _cache[d.EntityKey] = (rc, UpdatedAt: DateTime.UtcNow); // store time; invalidation uses DB timestamp per key
+            var rc = _builder.Build(def);
+            // Stamp with the definition ROW's UpdatedAt (not DateTime.UtcNow): freshness checks
+            // compare against the DB timestamp, and a wall-clock stamp would mask updates that
+            // raced the warm-up or differ by clock skew.
+            _cache.Entries[def.EntityKey] = (rc, updatedAt);
         }
     }
 
@@ -60,7 +65,7 @@ public sealed class DynamicResourceContractProvider : IResourceContractProvider
     public ResourceContract GetByResourceKey(string resourceKey)
     {
         // Check cache first to avoid blocking async call when possible
-        if (_cache.TryGetValue(resourceKey, out var cached))
+        if (_cache.Entries.TryGetValue(resourceKey, out var cached))
             return cached.Contract;
 
         // Fallback: run async on thread pool to avoid deadlocks
@@ -77,10 +82,14 @@ public sealed class DynamicResourceContractProvider : IResourceContractProvider
     {
         var updatedAt = await _store.GetUpdatedAtAsync(resourceKey, ct);
         if (updatedAt is null)
+        {
+            // Definition was deleted: drop any stale cached contract so `All` stays accurate.
+            _cache.Entries.TryRemove(resourceKey, out _);
             throw new KeyNotFoundException($"Unknown dynamic resourceKey '{resourceKey}'.");
+        }
 
         // Return cached if still fresh
-        if (_cache.TryGetValue(resourceKey, out var cached) && cached.UpdatedAt >= updatedAt.Value)
+        if (_cache.Entries.TryGetValue(resourceKey, out var cached) && cached.UpdatedAt >= updatedAt.Value)
             return cached.Contract;
 
         // Rebuild: cache miss or stale
@@ -88,7 +97,7 @@ public sealed class DynamicResourceContractProvider : IResourceContractProvider
                   ?? throw new KeyNotFoundException($"Unknown dynamic resourceKey '{resourceKey}'.");
 
         var rc2 = _builder.Build(def);
-        _cache[resourceKey] = (rc2, updatedAt.Value);
+        _cache.Entries[def.EntityKey] = (rc2, updatedAt.Value);
 
         return rc2;
     }

@@ -31,6 +31,23 @@ public sealed class DataSurfaceCrudOperationFilter : IOperationFilter
 
         if (meta is null) return;
 
+        // Auxiliary endpoints have their own request/response formats (BulkOperationSpec body,
+        // JSON-array import, NDJSON stream, CSV/JSON export, body-less HEAD). Overwriting their
+        // schemas with the resource's CRUD shapes would document the wrong contract — most
+        // notably /bulk, whose inferred BulkOperationSpec schema must stand.
+        if (meta.Kind != DataSurfaceEndpointKind.Crud)
+        {
+            if (meta.Kind is DataSurfaceEndpointKind.Export or DataSurfaceEndpointKind.Stream or DataSurfaceEndpointKind.Head)
+            {
+                // Filtering and sorting still apply to these list-shaped endpoints; paging does not.
+                operation.Parameters ??= new List<IOpenApiParameter>();
+                operation.Parameters.Add(StringQueryParam("sort"));
+                operation.Description = (operation.Description ?? "")
+                    + "\n\nFilters: use `filter[field]=op:value` (e.g. `filter[name]=contains:abc`).";
+            }
+            return;
+        }
+
         if (meta.ResourceKey == "*")
         {
             if (meta.Operation == CrudOperation.List)

@@ -22,6 +22,26 @@ public sealed class CrudRequestValidationException : Exception
 }
 
 /// <summary>
+/// Exception thrown when a CRUD operation is invoked on a resource that has it disabled.
+/// </summary>
+/// <remarks>
+/// Derives from <see cref="InvalidOperationException"/> for compatibility with callers
+/// that catch the previous exception type, but gives the HTTP error mapper a precise
+/// type so generic <see cref="InvalidOperationException"/>s (which are usually server
+/// bugs) are no longer reported as client errors.
+/// </remarks>
+public sealed class CrudOperationDisabledException : InvalidOperationException
+{
+    /// <summary>
+    /// Creates a new instance.
+    /// </summary>
+    /// <param name="resourceKey">The resource key being accessed.</param>
+    /// <param name="operation">The disabled operation name.</param>
+    public CrudOperationDisabledException(string resourceKey, string operation)
+        : base($"Operation '{operation}' is disabled for resource '{resourceKey}'.") { }
+}
+
+/// <summary>
 /// Exception thrown when a requested record cannot be found.
 /// </summary>
 public sealed class CrudNotFoundException : Exception

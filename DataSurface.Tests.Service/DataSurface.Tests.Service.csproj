@@ -32,6 +32,7 @@
     <ProjectReference Include="..\DataSurface.EFCore\DataSurface.EFCore.csproj" />
     <ProjectReference Include="..\DataSurface.Http\DataSurface.Http.csproj" />
     <ProjectReference Include="..\DataSurface.Dynamic\DataSurface.Dynamic.csproj" />
+    <ProjectReference Include="..\DataSurface.Admin\DataSurface.Admin.csproj" />
     <ProjectReference Include="..\DataSurface.Scalar\DataSurface.Scalar.csproj" />
   </ItemGroup>
 

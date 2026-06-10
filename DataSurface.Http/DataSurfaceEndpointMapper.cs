@@ -4,6 +4,7 @@ using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
 using DataSurface.Dynamic.Contracts; // optional but recommended for dynamic catch-all
 using DataSurface.EFCore.Contracts;
+using DataSurface.EFCore.Exceptions;
 using DataSurface.EFCore.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
@@ -32,20 +33,28 @@ public static class DataSurfaceEndpointMapper
 
         // Fail fast: API key auth without a validator would accept any non-empty key (presence-only,
         // not real validation), which is a security footgun. Require an IApiKeyValidator to be registered.
-        if (options.EnableApiKeyAuth && app.ServiceProvider.GetService<IApiKeyValidator>() is null)
+        // Uses IServiceProviderIsService rather than resolving, so a (typical) scoped validator does not
+        // blow up under root-scope validation at startup.
+        if (options.EnableApiKeyAuth && !IsApiKeyValidatorRegistered(app.ServiceProvider))
             throw new InvalidOperationException(
                 "EnableApiKeyAuth is true but no IApiKeyValidator is registered. Register one " +
-                "(e.g. services.AddSingleton<IApiKeyValidator, MyValidator>()) so API keys are validated — " +
+                "(e.g. services.AddScoped<IApiKeyValidator, MyValidator>()) so API keys are validated — " +
                 "without a validator, any non-empty key would be accepted.");
 
         var group = app.MapGroup(options.ApiPrefix);
 
-        // Schema endpoint is always available alongside CRUD endpoints
-        DataSurfaceSchemaEndpoint.MapSchema(group);
-
-        if (options.MapResourceDiscoveryEndpoint)
+        // Metadata endpoints (schema/discovery) expose the full data model, so they participate in
+        // the same default authorization / API key / rate limiting as the CRUD endpoints.
+        if (options.MapSchemaEndpoint || options.MapResourceDiscoveryEndpoint)
         {
-            DataSurfaceResourceDiscovery.MapDiscovery(group);
+            var meta = group.MapGroup("");
+            ApplyGroupBaseAuth(meta, options);
+
+            if (options.MapSchemaEndpoint)
+                DataSurfaceSchemaEndpoint.MapSchema(meta);
+
+            if (options.MapResourceDiscoveryEndpoint)
+                DataSurfaceResourceDiscovery.MapDiscovery(meta);
         }
 
         if (options.MapStaticResources)
@@ -55,6 +64,17 @@ public static class DataSurfaceEndpointMapper
             MapDynamicCatchAll(group, options);
 
         return app;
+    }
+
+    private static bool IsApiKeyValidatorRegistered(IServiceProvider sp)
+    {
+        var probe = sp.GetService<IServiceProviderIsService>();
+        if (probe is not null)
+            return probe.IsService(typeof(IApiKeyValidator));
+
+        // Container without IServiceProviderIsService support: fall back to resolving inside a scope.
+        using var scope = sp.CreateScope();
+        return scope.ServiceProvider.GetService<IApiKeyValidator>() is not null;
     }
 
     // ---------------------- Static mapping ----------------------
@@ -94,6 +114,9 @@ public static class DataSurfaceEndpointMapper
         {
             try
             {
+                var pre = PreAuthDynamic(req.HttpContext, opt);
+                if (pre is not null) return pre;
+
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
@@ -117,6 +140,9 @@ public static class DataSurfaceEndpointMapper
         {
             try
             {
+                var pre = PreAuthDynamic(req.HttpContext, opt);
+                if (pre is not null) return pre;
+
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
@@ -133,13 +159,16 @@ public static class DataSurfaceEndpointMapper
         })
         .WithName("DataSurface.Dynamic.Head")
         .WithTags("Dynamic")
-        .WithMetadata(new DataSurfaceCrudEndpointMetadata("*", CrudOperation.List));
+        .WithMetadata(new DataSurfaceCrudEndpointMetadata("*", CrudOperation.List, DataSurfaceEndpointKind.Head));
 
         // GET dynamic: GET /api/d/{route}/{id}
         dyn.MapGet("/{route}/{id}", async (string route, string id, HttpRequest req, HttpResponse res, IServiceProvider sp, CancellationToken ct) =>
         {
             try
             {
+                var pre = PreAuthDynamic(req.HttpContext, opt);
+                if (pre is not null) return pre;
+
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
@@ -163,6 +192,9 @@ public static class DataSurfaceEndpointMapper
         {
             try
             {
+                var pre = PreAuthDynamic(req.HttpContext, opt);
+                if (pre is not null) return pre;
+
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
@@ -186,6 +218,9 @@ public static class DataSurfaceEndpointMapper
         {
             try
             {
+                var pre = PreAuthDynamic(req.HttpContext, opt);
+                if (pre is not null) return pre;
+
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
@@ -209,6 +244,9 @@ public static class DataSurfaceEndpointMapper
         {
             try
             {
+                var pre = PreAuthDynamic(req.HttpContext, opt);
+                if (pre is not null) return pre;
+
                 var dynProvider = sp.GetRequiredService<DynamicResourceContractProvider>();
                 var contract = await dynProvider.TryGetByRouteAsync(route, ct);
                 if (contract is null) return Results.NotFound();
@@ -254,7 +292,7 @@ public static class DataSurfaceEndpointMapper
             })
             .WithTags(c.Route)
             .WithName($"{c.Route}.head")
-            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List, DataSurfaceEndpointKind.Head));
 
             ApplyAuth(headEp, c, CrudOperation.List, opt);
         }
@@ -329,9 +367,12 @@ public static class DataSurfaceEndpointMapper
             })
             .WithTags(c.Route)
             .WithName($"{c.Route}.bulk")
-            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Create));
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Create, DataSurfaceEndpointKind.Bulk));
 
-            ApplyAuth(ep, c, CrudOperation.Create, opt);
+            // Bulk spans Create/Update/Delete: the endpoint carries only the base (default)
+            // authorization; HandleBulk enforces the per-operation policies for whichever
+            // sections of the spec are non-empty.
+            ApplyBaseAuth(ep, opt);
         }
 
         // STREAM - GET /api/{resource}/stream
@@ -344,7 +385,7 @@ public static class DataSurfaceEndpointMapper
             })
             .WithTags(c.Route)
             .WithName($"{c.Route}.stream")
-            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List, DataSurfaceEndpointKind.Stream));
 
             ApplyAuth(ep, c, CrudOperation.List, opt);
         }
@@ -374,7 +415,7 @@ public static class DataSurfaceEndpointMapper
             })
             .WithTags(c.Route)
             .WithName($"{c.Route}.export")
-            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List));
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.List, DataSurfaceEndpointKind.Export));
 
             ApplyAuth(ep, c, CrudOperation.List, opt);
         }
@@ -389,7 +430,7 @@ public static class DataSurfaceEndpointMapper
             })
             .WithTags(c.Route)
             .WithName($"{c.Route}.import")
-            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Create));
+            .WithMetadata(new DataSurfaceCrudEndpointMetadata(c.ResourceKey, CrudOperation.Create, DataSurfaceEndpointKind.Import));
 
             ApplyAuth(ep, c, CrudOperation.Create, opt);
         }
@@ -418,15 +459,58 @@ public static class DataSurfaceEndpointMapper
 
         // API key authentication
         if (opt.EnableApiKeyAuth)
-        {
-            ep.AddEndpointFilterFactory((context, next) =>
-            {
-                var validator = context.ApplicationServices.GetService<IApiKeyValidator>();
-                var filter = new DataSurfaceApiKeyFilter(opt, validator);
-                return invocationContext => filter.InvokeAsync(invocationContext, next);
-            });
-        }
+            ep.AddEndpointFilterFactory(ApiKeyFilterFactory(opt));
     }
+
+    // Applies the default authorization, rate-limiting and API-key concerns to an endpoint
+    // WITHOUT a per-operation resource policy (used for bulk — which spans Create/Update/Delete
+    // and enforces per-section policies per request — and for metadata endpoints).
+    private static void ApplyBaseAuth(RouteHandlerBuilder ep, DataSurfaceHttpOptions opt)
+    {
+        if (opt.RequireAuthorizationByDefault)
+        {
+            if (!string.IsNullOrWhiteSpace(opt.DefaultPolicy))
+                ep.RequireAuthorization(opt.DefaultPolicy);
+            else
+                ep.RequireAuthorization();
+        }
+
+        if (opt.EnableRateLimiting && !string.IsNullOrWhiteSpace(opt.RateLimitingPolicy))
+            ep.RequireRateLimiting(opt.RateLimitingPolicy);
+
+        if (opt.EnableApiKeyAuth)
+            ep.AddEndpointFilterFactory(ApiKeyFilterFactory(opt));
+    }
+
+    // Group-level variant of ApplyBaseAuth (metadata endpoints).
+    private static void ApplyGroupBaseAuth(RouteGroupBuilder g, DataSurfaceHttpOptions opt)
+    {
+        if (opt.RequireAuthorizationByDefault)
+        {
+            if (!string.IsNullOrWhiteSpace(opt.DefaultPolicy))
+                g.RequireAuthorization(opt.DefaultPolicy);
+            else
+                g.RequireAuthorization();
+        }
+
+        if (opt.EnableRateLimiting && !string.IsNullOrWhiteSpace(opt.RateLimitingPolicy))
+            g.RequireRateLimiting(opt.RateLimitingPolicy);
+
+        if (opt.EnableApiKeyAuth)
+            g.AddEndpointFilterFactory(ApiKeyFilterFactory(opt));
+    }
+
+    // The validator is resolved from the REQUEST services on every invocation: the filter factory
+    // runs once at pipeline build, and resolving there from the root provider would either throw
+    // for a scoped validator (the typical DbContext-backed case) or capture it for the app's
+    // lifetime as an unintended singleton.
+    private static Func<EndpointFilterFactoryContext, EndpointFilterDelegate, EndpointFilterDelegate> ApiKeyFilterFactory(DataSurfaceHttpOptions opt)
+        => (context, next) => invocationContext =>
+        {
+            var validator = invocationContext.HttpContext.RequestServices.GetService<IApiKeyValidator>();
+            var filter = new DataSurfaceApiKeyFilter(opt, validator);
+            return filter.InvokeAsync(invocationContext, next);
+        };
 
     // Applies the rate-limiting and API-key concerns to the dynamic catch-all group. Authorization
     // (per-resource policy OR the default requirement) is enforced per-request in EnforceDynamicPolicyAsync,
@@ -437,14 +521,16 @@ public static class DataSurfaceEndpointMapper
             dyn.RequireRateLimiting(opt.RateLimitingPolicy);
 
         if (opt.EnableApiKeyAuth)
-        {
-            dyn.AddEndpointFilterFactory((context, next) =>
-            {
-                var validator = context.ApplicationServices.GetService<IApiKeyValidator>();
-                var filter = new DataSurfaceApiKeyFilter(opt, validator);
-                return invocationContext => filter.InvokeAsync(invocationContext, next);
-            });
-        }
+            dyn.AddEndpointFilterFactory(ApiKeyFilterFactory(opt));
+    }
+
+    // Anonymous requests must not be able to distinguish existing dynamic resources (401) from
+    // non-existent ones (404). When default authorization is on, deny before the route lookup.
+    private static IResult? PreAuthDynamic(HttpContext http, DataSurfaceHttpOptions opt)
+    {
+        if (!opt.RequireAuthorizationByDefault) return null;
+        var authenticated = http.User.Identity?.IsAuthenticated ?? false;
+        return authenticated ? null : Results.Challenge();
     }
 
     // Enforces a resource's per-operation authorization policy on the dynamic catch-all routes,
@@ -505,7 +591,9 @@ public static class DataSurfaceEndpointMapper
         // Set Cache-Control header if configured
         if (opt.CacheControlMaxAgeSeconds > 0)
         {
-            res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
+            // 'private': responses are typically tenant- or user-scoped; a shared cache (CDN/
+            // reverse proxy) must not serve one principal's payload to another.
+            res.Headers.CacheControl = $"private, max-age={opt.CacheControlMaxAgeSeconds}";
         }
 
         return Results.Ok(result);
@@ -517,18 +605,22 @@ public static class DataSurfaceEndpointMapper
 
         // Use minimal page size since we only need the count
         var spec = DataSurfaceQueryParser.ParseQuerySpec(req, c);
+        // Report the page size an equivalent GET would use, not the internal count-only size.
+        var effectivePageSize = Math.Clamp(spec.PageSize, 1, c.Query.MaxPageSize);
         spec = spec with { PageSize = 1 };
 
         var result = await crud.ListAsync(c.ResourceKey, spec, expand: null, ct);
 
         res.Headers["X-Total-Count"] = result.Total.ToString();
         res.Headers["X-Page"] = result.Page.ToString();
-        res.Headers["X-Page-Size"] = c.Query.MaxPageSize.ToString();
+        res.Headers["X-Page-Size"] = effectivePageSize.ToString();
 
         // Set Cache-Control header if configured
         if (opt.CacheControlMaxAgeSeconds > 0)
         {
-            res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
+            // 'private': responses are typically tenant- or user-scoped; a shared cache (CDN/
+            // reverse proxy) must not serve one principal's payload to another.
+            res.Headers.CacheControl = $"private, max-age={opt.CacheControlMaxAgeSeconds}";
         }
 
         return Results.StatusCode(200);
@@ -558,19 +650,18 @@ public static class DataSurfaceEndpointMapper
 
         // Set ETag and check for conditional GET (304 Not Modified)
         var etag = DataSurfaceHttpEtags.TrySetEtag(res, c, obj, opt.EnableEtags);
-        if (opt.EnableConditionalGet && etag is not null)
+        if (opt.EnableConditionalGet && etag is not null
+            && DataSurfaceHttpEtags.IfNoneMatchMatches(req.Headers.IfNoneMatch, etag))
         {
-            var ifNoneMatch = req.Headers.IfNoneMatch.FirstOrDefault();
-            if (ifNoneMatch is not null && ifNoneMatch.Trim('"') == etag.Trim('"'))
-            {
-                return Results.StatusCode(304);
-            }
+            return Results.StatusCode(304);
         }
 
         // Set Cache-Control header if configured
         if (opt.CacheControlMaxAgeSeconds > 0)
         {
-            res.Headers.CacheControl = $"max-age={opt.CacheControlMaxAgeSeconds}";
+            // 'private': responses are typically tenant- or user-scoped; a shared cache (CDN/
+            // reverse proxy) must not serve one principal's payload to another.
+            res.Headers.CacheControl = $"private, max-age={opt.CacheControlMaxAgeSeconds}";
         }
 
         return Results.Ok(obj);
@@ -584,15 +675,16 @@ public static class DataSurfaceEndpointMapper
 
         DataSurfaceHttpEtags.TrySetEtag(res, c, created, opt.EnableEtags);
 
-        // Location
+        // Location: relative URI (the inbound Host header is client-controlled and PathBase can
+        // be stripped by proxies), with the id URL-encoded for string keys.
         var keyApi = GetKeyApiName(c);
         if (created.TryGetPropertyValue(keyApi, out var idNode) && idNode != null)
         {
             var idVal = idNode.ToJsonString().Trim('"');
-            return Results.Created($"{req.Scheme}://{req.Host}{req.Path}/{idVal}", created);
+            return Results.Created($"{req.PathBase}{req.Path}/{Uri.EscapeDataString(idVal)}", created);
         }
 
-        return Results.Created(req.Path, created);
+        return Results.Created($"{req.PathBase}{req.Path}", created);
     }
 
     private static async Task<IResult> HandleUpdate(ResourceContract c, string id, JsonObject patch, HttpRequest req, HttpResponse res, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
@@ -630,6 +722,25 @@ public static class DataSurfaceEndpointMapper
 
     private static async Task<IResult> HandleBulk(ResourceContract c, BulkOperationSpec spec, HttpRequest req, IServiceProvider sp, DataSurfaceHttpOptions opt, CancellationToken ct)
     {
+        // A bulk request executes creates, updates AND deletes; each non-empty section must
+        // satisfy that operation's policy — a caller with only the Create policy must not be
+        // able to mass-update or mass-delete through /bulk.
+        if (spec.Create.Count > 0)
+        {
+            var deny = await EnforceDynamicPolicyAsync(c, CrudOperation.Create, req.HttpContext, opt);
+            if (deny is not null) return deny;
+        }
+        if (spec.Update.Count > 0)
+        {
+            var deny = await EnforceDynamicPolicyAsync(c, CrudOperation.Update, req.HttpContext, opt);
+            if (deny is not null) return deny;
+        }
+        if (spec.Delete.Count > 0)
+        {
+            var deny = await EnforceDynamicPolicyAsync(c, CrudOperation.Delete, req.HttpContext, opt);
+            if (deny is not null) return deny;
+        }
+
         var bulk = sp.GetRequiredService<IDataSurfaceBulkService>();
         var result = await bulk.ExecuteAsync(c.ResourceKey, spec, ct);
 
@@ -649,11 +760,11 @@ public static class DataSurfaceEndpointMapper
 
         return Results.Stream(async stream =>
         {
-            var writer = new System.IO.StreamWriter(stream);
+            await using var writer = new System.IO.StreamWriter(stream);
             await foreach (var item in streaming.StreamAsync(c.ResourceKey, spec, expand, ct))
             {
                 await writer.WriteLineAsync(item.ToJsonString());
-                await writer.FlushAsync();
+                await writer.FlushAsync(ct);
             }
         }, contentType: "application/x-ndjson");
     }
@@ -667,10 +778,12 @@ public static class DataSurfaceEndpointMapper
 
         var keyObj = ParseId(id, c);
 
-        // For PUT (full replacement), validate that all updatable fields are present
+        // For PUT (full replacement), validate that all updatable fields are present.
+        // Body keys are matched case-insensitively, like the rest of the pipeline.
         var oc = c.Operations[CrudOperation.Update];
+        var bodyKeys = new HashSet<string>(body.Select(kv => kv.Key), StringComparer.OrdinalIgnoreCase);
         var missing = oc.InputShape
-            .Where(fieldName => !body.ContainsKey(fieldName))
+            .Where(fieldName => !bodyKeys.Contains(fieldName))
             .ToList();
 
         if (missing.Count > 0)
@@ -706,6 +819,12 @@ public static class DataSurfaceEndpointMapper
         {
             var batchSpec = spec with { Page = page, PageSize = c.Query.MaxPageSize };
             var result = await crud.ListAsync(c.ResourceKey, batchSpec, expand: null, ct);
+
+            // An empty page means pagination cannot reach the reported total (e.g. an override
+            // returning an inconsistent Total) — bail out instead of spinning forever.
+            if (result.Items.Count == 0)
+                break;
+
             allItems.AddRange(result.Items);
             total = result.Total;
             page++;
@@ -740,7 +859,15 @@ public static class DataSurfaceEndpointMapper
                 {
                     if (item.TryGetPropertyValue(field.ApiName, out var val) && val != null)
                     {
-                        var str = val.ToString().Replace("\"", "\"\"");
+                        var str = val.ToString();
+
+                        // CSV/formula injection: cells starting with =, +, -, @, tab or CR are
+                        // interpreted as formulas by Excel/LibreOffice. Neutralize with a
+                        // leading apostrophe.
+                        if (str.Length > 0 && str[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
+                            str = "'" + str;
+
+                        str = str.Replace("\"", "\"\"");
                         return $"\"{str}\"";
                     }
                     return "\"\"";
@@ -763,7 +890,15 @@ public static class DataSurfaceEndpointMapper
         using var reader = new System.IO.StreamReader(req.Body);
         var bodyText = await reader.ReadToEndAsync(ct);
 
-        var items = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.Nodes.JsonArray>(bodyText);
+        JsonArray? items;
+        try
+        {
+            items = System.Text.Json.JsonSerializer.Deserialize<JsonArray>(bodyText);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return Results.BadRequest(new { error = "Request body must be a valid JSON array." });
+        }
         if (items == null || items.Count == 0)
             return Results.BadRequest(new { error = "Request body must be a non-empty JSON array." });
 
@@ -794,7 +929,16 @@ public static class DataSurfaceEndpointMapper
             catch (Exception ex)
             {
                 failureCount++;
-                errors.Add(new { row = rowNum, error = ex.Message });
+                // Only DataSurface's own client-facing exceptions carry safe messages; anything
+                // else (DbUpdateException, provider errors) would leak internals to the caller.
+                var message = ex switch
+                {
+                    CrudRequestValidationException vex =>
+                        string.Join(" ", vex.Errors.Select(e => $"{e.Key}: {string.Join(", ", e.Value)}")),
+                    CrudNotFoundException or CrudConcurrencyException or CrudOperationDisabledException => ex.Message,
+                    _ => "Failed to import row."
+                };
+                errors.Add(new { row = rowNum, error = message });
             }
         }
 
@@ -817,11 +961,19 @@ public static class DataSurfaceEndpointMapper
 
     private static object ParseId(string raw, ResourceContract c)
     {
+        // TryParse: int/long.Parse throw OverflowException for out-of-range input, which the
+        // error mapper does not treat as a 400. FormatException maps to 400 consistently.
         return c.Key.Type switch
         {
-            FieldType.Int32 => int.Parse(raw),
-            FieldType.Int64 => long.Parse(raw),
-            FieldType.Guid => Guid.Parse(raw),
+            FieldType.Int32 => int.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var i)
+                ? i
+                : throw new FormatException($"'{raw}' is not a valid integer id."),
+            FieldType.Int64 => long.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var l)
+                ? l
+                : throw new FormatException($"'{raw}' is not a valid integer id."),
+            FieldType.Guid => Guid.TryParse(raw, out var g)
+                ? g
+                : throw new FormatException($"'{raw}' is not a valid GUID id."),
             FieldType.String => raw,
             _ => raw
         };

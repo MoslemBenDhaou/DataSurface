@@ -66,4 +66,14 @@ public sealed class CrudResourceAttribute : Attribute
     /// Gets or sets the maximum depth allowed when expanding relations during reads.
     /// </summary>
     public int MaxExpandDepth { get; set; } = 1;
+
+    /// <summary>
+    /// Gets or sets the default sort applied to list queries when the client does not specify one
+    /// (for example <c>"name"</c> or <c>"-createdAt,name"</c>). Fields must be sortable.
+    /// </summary>
+    /// <remarks>
+    /// A deterministic order is required for stable pagination; the query engine always appends
+    /// the key as a final tie-breaker.
+    /// </remarks>
+    public string? DefaultSort { get; set; }
 }

@@ -4,6 +4,9 @@ using System.Text.Json.Nodes;
 using DataSurface.Core;
 using DataSurface.Core.Contracts;
 using DataSurface.Core.Enums;
+using DataSurface.EFCore.Exceptions;
+using DataSurface.EFCore.Interfaces;
+using DataSurface.EFCore.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace DataSurface.EFCore.Mapper;
@@ -22,14 +25,20 @@ public sealed class EfCrudMapper
 {
     private readonly JsonSerializerOptions _json;
     private readonly DataSurfaceFeatures _features;
+    private readonly CrudSecurityDispatcher? _security;
+    private readonly IResourceContractProvider? _contracts;
 
     /// <summary>
     /// Creates a new mapper instance.
     /// </summary>
     /// <param name="features">Feature flags; default values are only applied when <see cref="DataSurfaceFeatures.EnableDefaultValues"/> is enabled.</param>
-    public EfCrudMapper(DataSurfaceFeatures? features = null)
+    /// <param name="security">Optional security dispatcher; when present, relation writes load target entities through the same tenant/row-level scoping as reads.</param>
+    /// <param name="contracts">Optional contract provider used to resolve relation-target contracts for scoped relation writes.</param>
+    public EfCrudMapper(DataSurfaceFeatures? features = null, CrudSecurityDispatcher? security = null, IResourceContractProvider? contracts = null)
     {
         _features = features ?? new DataSurfaceFeatures();
+        _security = security;
+        _contracts = contracts;
         _json = new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true
@@ -66,9 +75,9 @@ public sealed class EfCrudMapper
         {
             if (field.DefaultValue is null) continue;
             if (field.Hidden || !field.InCreate) continue;
-            
-            // Only apply default if field not provided in body
-            if (body.ContainsKey(field.ApiName)) continue;
+
+            // Only apply default if field not provided in body (case-insensitive, like ApplyFields)
+            if (body.Any(kv => string.Equals(kv.Key, field.ApiName, StringComparison.OrdinalIgnoreCase))) continue;
 
             // Use entity.GetType() instead of typeof(TEntity) to get actual runtime type
             var prop = entity.GetType().GetProperty(field.Name);
@@ -235,6 +244,8 @@ public sealed class EfCrudMapper
             if (!body.TryGetPropertyValue(keyName!, out var node) || node is null)
                 continue;
 
+            var targetContract = ResolveContractOrNull(rel.TargetResourceKey);
+
             if (write.Mode == RelationWriteMode.ById)
             {
                 // Set FK property (e.g. UserId)
@@ -244,6 +255,22 @@ public sealed class EfCrudMapper
                 if (fkProp == null || !fkProp.CanWrite) continue;
 
                 var fkVal = DeserializeNode(node, fkProp.PropertyType);
+
+                // The FK target must be visible to the caller (tenant / row-level / soft-delete
+                // scoped). Without this, a caller could attach another tenant's row by id.
+                if (fkVal is not null)
+                {
+                    var navTargetType = GetNavigationTarget(entity.GetType().GetProperty(rel.Name)?.PropertyType ?? typeof(object)).Target;
+                    var resolvedTarget = navTargetType != typeof(object) ? navTargetType : null;
+                    if (resolvedTarget is not null && !TargetExistsInScope(db, resolvedTarget, targetContract, fkVal))
+                    {
+                        throw new CrudRequestValidationException(new Dictionary<string, string[]>
+                        {
+                            [keyName!] = new[] { "Related entity does not exist or is not accessible." }
+                        });
+                    }
+                }
+
                 fkProp.SetValue(entity, fkVal);
             }
             else if (write.Mode == RelationWriteMode.ByIdList)
@@ -255,22 +282,80 @@ public sealed class EfCrudMapper
                 var (targetType, isCollection) = GetNavigationTarget(navProp.PropertyType);
                 if (!isCollection) continue;
 
-                var ids = DeserializeIds(node, targetType);
-                ReplaceCollectionByIds(entity, navProp, targetType, ids, db);
+                var ids = DeserializeIds(node, targetType, targetContract);
+                ReplaceCollectionByIds(entity, navProp, targetType, targetContract, keyName!, ids, db);
             }
         }
+    }
+
+    private ResourceContract? ResolveContractOrNull(string resourceKey)
+        => _contracts?.All.FirstOrDefault(rc => rc.ResourceKey.Equals(resourceKey, StringComparison.OrdinalIgnoreCase));
+
+    // Composes the same visibility scoping the CRUD service applies to reads: row-level
+    // security filters, tenant isolation, and the soft-delete predicate. Relation writes
+    // must load their targets through this scope or they become a cross-tenant primitive.
+    private IQueryable ScopedTargetQuery(DbContext db, Type targetType, ResourceContract? targetContract)
+    {
+        var set = GetDbSet(db, targetType);
+
+        if (_security is not null && targetContract is not null)
+        {
+            set = _security.ApplyResourceFilter(set, targetType, targetContract);
+            if (targetContract.Tenant is not null)
+                set = _security.ApplyTenantFilter(set, targetType, targetContract);
+        }
+
+        if (typeof(ISoftDelete).IsAssignableFrom(targetType))
+        {
+            var p = System.Linq.Expressions.Expression.Parameter(targetType, "t");
+            var notDeleted = System.Linq.Expressions.Expression.Not(
+                System.Linq.Expressions.Expression.Property(p, nameof(ISoftDelete.IsDeleted)));
+            var lambda = System.Linq.Expressions.Expression.Lambda(notDeleted, p);
+            var whereMethod = typeof(Queryable).GetMethods()
+                .First(m => m.Name == nameof(Queryable.Where) && m.GetParameters().Length == 2)
+                .MakeGenericMethod(targetType);
+            set = (IQueryable)whereMethod.Invoke(null, new object[] { set, lambda })!;
+        }
+
+        return set;
+    }
+
+    private bool TargetExistsInScope(DbContext db, Type targetType, ResourceContract? targetContract, object fkVal)
+    {
+        var keyProp = ResolveTargetKeyProperty(targetType, targetContract);
+        if (keyProp is null) return true; // cannot introspect: defer to DB FK constraints
+
+        var set = ScopedTargetQuery(db, targetType, targetContract);
+
+        var param = System.Linq.Expressions.Expression.Parameter(targetType, "t");
+        var member = System.Linq.Expressions.Expression.Property(param, keyProp.Name);
+        object typedVal;
+        try { typedVal = CoerceId(fkVal, member.Type); }
+        catch (Exception) { return false; }
+        var eq = System.Linq.Expressions.Expression.Equal(
+            member, System.Linq.Expressions.Expression.Constant(typedVal, member.Type));
+        var lambda = System.Linq.Expressions.Expression.Lambda(eq, param);
+
+        var anyMethod = typeof(Queryable).GetMethods()
+            .First(m => m.Name == nameof(Queryable.Any) && m.GetParameters().Length == 2)
+            .MakeGenericMethod(targetType);
+
+        return (bool)anyMethod.Invoke(null, new object[] { set, lambda })!;
     }
 
     private void ReplaceCollectionByIds(
         object entity,
         System.Reflection.PropertyInfo navProp,
         Type targetType,
+        ResourceContract? targetContract,
+        string writeFieldName,
         IReadOnlyList<object> ids,
         DbContext db)
     {
-        // Load targets: SELECT * WHERE Id IN (...)
-        var set = GetDbSet(db, targetType);
-        var idProp = targetType.GetProperty("Id") ?? targetType.GetProperty(targetType.Name + "Id");
+        // Load targets: SELECT * WHERE Id IN (...) — scoped by tenant / row-level security /
+        // soft-delete so callers can only attach rows they are allowed to see.
+        var set = ScopedTargetQuery(db, targetType, targetContract);
+        var idProp = ResolveTargetKeyProperty(targetType, targetContract);
         if (idProp == null) return;
 
         var param = System.Linq.Expressions.Expression.Parameter(targetType, "t");
@@ -282,7 +367,7 @@ public sealed class EfCrudMapper
             .MakeGenericMethod(member.Type);
 
         var idsArray = Array.CreateInstance(member.Type, ids.Count);
-        for (int i = 0; i < ids.Count; i++) idsArray.SetValue(Convert.ChangeType(ids[i], member.Type), i);
+        for (int i = 0; i < ids.Count; i++) idsArray.SetValue(CoerceId(ids[i], member.Type), i);
 
         var idsConst = System.Linq.Expressions.Expression.Constant(idsArray);
         var containsCall = System.Linq.Expressions.Expression.Call(null, containsMethod, idsConst, member);
@@ -299,6 +384,17 @@ public sealed class EfCrudMapper
 
         var loadedList = (IList)toListMethod.Invoke(null, new object[] { filtered })!;
 
+        // Every requested id must resolve to a visible row; silently dropping unknown or
+        // inaccessible ids would mask client errors and existence probes alike.
+        var distinctRequested = ids.Select(i => CoerceId(i, member.Type)).Distinct().Count();
+        if (loadedList.Count != distinctRequested)
+        {
+            throw new CrudRequestValidationException(new Dictionary<string, string[]>
+            {
+                [writeFieldName] = new[] { "One or more related entities do not exist or are not accessible." }
+            });
+        }
+
         // Replace collection
         var current = navProp.GetValue(entity);
         if (current is IList list)
@@ -314,6 +410,29 @@ public sealed class EfCrudMapper
         foreach (var item in loadedList) newList.Add(item);
 
         if (navProp.CanWrite) navProp.SetValue(entity, newList);
+    }
+
+    // Resolves the target's key property, preferring the target contract's declared key over
+    // the Id / {TypeName}Id naming convention.
+    private static System.Reflection.PropertyInfo? ResolveTargetKeyProperty(Type targetType, ResourceContract? targetContract)
+    {
+        if (targetContract is not null)
+        {
+            var byContract = targetType.GetProperty(targetContract.Key.Name);
+            if (byContract is not null) return byContract;
+        }
+        return targetType.GetProperty("Id") ?? targetType.GetProperty(targetType.Name + "Id");
+    }
+
+    // Convert.ChangeType alone throws for Guid/enum ids.
+    private static object CoerceId(object id, Type targetType)
+    {
+        var t = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        if (t.IsInstanceOfType(id)) return id;
+        if (t == typeof(string)) return id.ToString()!;
+        if (t == typeof(Guid)) return id is Guid g ? g : Guid.Parse(id.ToString()!);
+        if (t.IsEnum) return id is string es ? Enum.Parse(t, es, ignoreCase: true) : Enum.ToObject(t, id);
+        return Convert.ChangeType(id, t, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static IQueryable GetDbSet(DbContext db, Type entityType)
@@ -344,10 +463,9 @@ public sealed class EfCrudMapper
         return (t, false);
     }
 
-    private IReadOnlyList<object> DeserializeIds(JsonNode node, Type targetType)
+    private IReadOnlyList<object> DeserializeIds(JsonNode node, Type targetType, ResourceContract? targetContract)
     {
-        // Assumes target has Id property; ID type is that property type.
-        var idProp = targetType.GetProperty("Id") ?? targetType.GetProperty(targetType.Name + "Id");
+        var idProp = ResolveTargetKeyProperty(targetType, targetContract);
         var idType = idProp?.PropertyType ?? typeof(int);
 
         if (node is JsonArray arr)

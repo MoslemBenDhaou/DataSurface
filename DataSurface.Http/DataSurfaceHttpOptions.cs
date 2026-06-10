@@ -35,6 +35,13 @@ public sealed class DataSurfaceHttpOptions
     /// </summary>
     public bool MapResourceDiscoveryEndpoint { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets whether to map the schema endpoint (<c>GET /$schema/{resourceKey}</c>).
+    /// The endpoint participates in the same default authorization / API key / rate limiting
+    /// as CRUD endpoints.
+    /// </summary>
+    public bool MapSchemaEndpoint { get; set; } = true;
+
     // Security
     /// <summary>
     /// Gets or sets whether endpoints require authorization by default.
@@ -56,8 +63,10 @@ public sealed class DataSurfaceHttpOptions
     // Strict: if true, fail fast on route collisions
     /// <summary>
     /// Gets or sets whether to throw an exception when a route collision is detected during mapping.
+    /// Defaults to <see langword="true"/>: a collision is always a configuration error, and mapping
+    /// both endpoints would surface as an <c>AmbiguousMatchException</c> (500) at request time instead.
     /// </summary>
-    public bool ThrowOnRouteCollision { get; set; } = false;
+    public bool ThrowOnRouteCollision { get; set; } = true;
 
     // Bulk operations
     /// <summary>

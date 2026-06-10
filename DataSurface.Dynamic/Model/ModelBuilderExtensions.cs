@@ -79,6 +79,10 @@ public static class ModelBuilderExtensions
             b.Property(x => x.RecordId).HasMaxLength(128).IsRequired();
             b.Property(x => x.PropertyApiName).HasMaxLength(200).IsRequired();
 
+            // Explicit precision: without it relational providers default to decimal(18,2),
+            // silently truncating indexed numeric values.
+            b.Property(x => x.ValueNumber).HasPrecision(38, 12);
+
             b.HasIndex(x => new { x.EntityKey, x.RecordId });
             b.HasIndex(x => new { x.EntityKey, x.PropertyApiName, x.ValueString });
             b.HasIndex(x => new { x.EntityKey, x.PropertyApiName, x.ValueNumber });

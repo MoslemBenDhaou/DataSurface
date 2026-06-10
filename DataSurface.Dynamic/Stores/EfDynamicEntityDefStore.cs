@@ -74,6 +74,23 @@ public sealed class EfDynamicEntityDefStore : IDynamicEntityDefStore
 
     /// <inheritdoc />
     /// <summary>
+    /// Retrieves all entity definitions together with their row <c>UpdatedAt</c> timestamps.
+    /// </summary>
+    /// <param name="ct">The cancellation token.</param>
+    /// <returns>A list of (definition, updatedAt) pairs.</returns>
+    public async Task<IReadOnlyList<(EntityDef Def, DateTime UpdatedAt)>> GetAllWithTimestampsAsync(CancellationToken ct)
+    {
+        var rows = await _db.Set<DsEntityDefRow>()
+            .AsNoTracking()
+            .Include(x => x.Properties)
+            .Include(x => x.Relations)
+            .ToListAsync(ct);
+
+        return rows.Select(r => (Map(r), r.UpdatedAt)).ToList();
+    }
+
+    /// <inheritdoc />
+    /// <summary>
     /// Retrieves the last updated date and time for an entity definition.
     /// </summary>
     /// <param name="entityKey">The entity key.</param>

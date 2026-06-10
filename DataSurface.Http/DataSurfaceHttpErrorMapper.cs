@@ -134,24 +134,27 @@ public static class DataSurfaceHttpErrorMapper
                 extensions: extensions);
         }
 
-        // Argument exceptions (400)
-        if (ex is ArgumentException argEx)
+        // Malformed JSON payload (400)
+        if (ex is System.Text.Json.JsonException jsonEx)
         {
-            logger?.LogWarning("Invalid argument for request {TraceId}: {Message}", traceId, argEx.Message);
+            logger?.LogWarning("Malformed JSON for request {TraceId}: {Message}", traceId, jsonEx.Message);
             return Results.Problem(
-                title: "Invalid argument",
-                detail: argEx.Message,
+                title: "Malformed JSON",
+                detail: "The request body is not valid JSON.",
                 statusCode: StatusCodes.Status400BadRequest,
                 extensions: extensions);
         }
 
-        // Operation not allowed / disabled (400)
-        if (ex is InvalidOperationException invalidOp)
+        // Operation disabled on this resource (400). Only DataSurface's own exception type maps
+        // here; generic InvalidOperationException/ArgumentException are usually server bugs (EF
+        // translation failures, DI errors) and must fall through to the safe 500 below — mapping
+        // them to 400 both leaked internals and mislabeled server faults as client errors.
+        if (ex is CrudOperationDisabledException disabledOp)
         {
-            logger?.LogWarning("Invalid operation for request {TraceId}: {Message}", traceId, invalidOp.Message);
+            logger?.LogWarning("Disabled operation invoked for request {TraceId}: {Message}", traceId, disabledOp.Message);
             return Results.Problem(
                 title: "Operation not allowed",
-                detail: invalidOp.Message,
+                detail: disabledOp.Message,
                 statusCode: StatusCodes.Status400BadRequest,
                 extensions: extensions);
         }
@@ -162,7 +165,7 @@ public static class DataSurfaceHttpErrorMapper
             logger?.LogWarning("Key not found for request {TraceId}: {Message}", traceId, keyNotFound.Message);
             return Results.Problem(
                 title: "Resource not found",
-                detail: keyNotFound.Message,
+                detail: isDevelopment ? keyNotFound.Message : "The requested resource was not found.",
                 statusCode: StatusCodes.Status404NotFound,
                 extensions: extensions);
         }

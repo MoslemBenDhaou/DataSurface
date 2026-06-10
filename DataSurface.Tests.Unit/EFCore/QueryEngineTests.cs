@@ -491,8 +491,9 @@ public class QueryEngineTests
 
         var result = _engine.Apply(data, contract, spec).ToList();
 
-        // Order unchanged since title is not sortable
-        result[0].Id.Should().Be(2);
-        result[1].Id.Should().Be(1);
+        // 'title' is not sortable so the requested sort is ignored; the engine then falls back
+        // to ordering by the key so Skip/Take pagination stays deterministic.
+        result[0].Id.Should().Be(1);
+        result[1].Id.Should().Be(2);
     }
 }

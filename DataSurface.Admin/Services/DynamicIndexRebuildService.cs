@@ -11,6 +11,10 @@ namespace DataSurface.Admin.Services;
 /// </summary>
 public sealed class DynamicIndexRebuildService
 {
+    // Records are processed in pages so a large entity does not get materialized (tracked)
+    // in memory at once, and index changes are saved once per page rather than per record.
+    private const int BatchSize = 200;
+
     private readonly DbContext _db;
     private readonly DynamicResourceContractProvider _contracts;
     private readonly IDynamicIndexService _index;
@@ -38,18 +42,36 @@ public sealed class DynamicIndexRebuildService
     {
         var c = await _contracts.GetByResourceKeyAsync(entityKey, ct);
 
-        var rows = await _db.Set<DsDynamicRecordRow>()
-            .Where(r => r.EntityKey == entityKey && !r.IsDeleted)
-            .ToListAsync(ct);
-
         var count = 0;
-        foreach (var row in rows)
-        {
-            var obj = JsonNode.Parse(row.DataJson)?.AsObject();
-            if (obj is null) continue;
+        var page = 0;
 
-            await _index.RebuildIndexesAsync(entityKey, row.Id, c, obj, ct);
-            count++;
+        while (true)
+        {
+            var rows = await _db.Set<DsDynamicRecordRow>()
+                .AsNoTracking()
+                .Where(r => r.EntityKey == entityKey && !r.IsDeleted)
+                .OrderBy(r => r.Id)
+                .Skip(page * BatchSize)
+                .Take(BatchSize)
+                .ToListAsync(ct);
+
+            if (rows.Count == 0) break;
+
+            foreach (var row in rows)
+            {
+                var obj = JsonNode.Parse(row.DataJson)?.AsObject();
+                if (obj is null) continue;
+
+                // Stages old-row removal (async) + fresh rows on the change tracker.
+                await _index.StageIndexRowsAsync(entityKey, row.Id, c, obj, ct);
+                count++;
+            }
+
+            // One SaveChanges per page instead of per record.
+            await _db.SaveChangesAsync(ct);
+            _db.ChangeTracker.Clear();
+
+            page++;
         }
 
         return count;

@@ -33,7 +33,13 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDynamicEntityDefStore, EfDynamicEntityDefStore>();
         services.AddScoped<IDynamicIndexService, EfDynamicIndexService>();
 
+        // Shared contract cache: the provider is scoped, so the cache must outlive it for
+        // `All` (discovery/schema) to see contracts loaded by other scopes / the warm-up.
+        services.AddSingleton<DynamicContractCache>();
         services.AddScoped<DynamicResourceContractProvider>();
+
+        if (opt.WarmUpContractsOnStart)
+            services.AddHostedService<DynamicContractWarmupHostedService>();
         services.AddScoped<CrudResourceHookDispatcher>();
 
         services.AddScoped<DynamicDataSurfaceCrudService>();
